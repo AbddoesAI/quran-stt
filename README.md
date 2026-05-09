@@ -40,7 +40,7 @@ flags uncertain segments for human review.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/quran-stt.git
+git clone https://github.com/AbddoesAI/quran-stt.git
 cd quran-stt
 ```
 
@@ -133,7 +133,7 @@ print(f"Transcribed {stats['total_segments']} segments in {stats['elapsed_second
 ```python
 # Cell 1: Install
 !pip install faster-whisper langdetect lingua-language-detector rapidfuzz tqdm colorama
-!git clone https://github.com/yourusername/quran-stt.git
+!git clone https://github.com/AbddoesAI/quran-stt.git
 %cd quran-stt
 !pip install -e .
 !python scripts/setup_corpus.py
