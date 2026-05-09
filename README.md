@@ -171,8 +171,6 @@ quran-stt/
 ├── scripts/                   # Utility scripts
 │   └── setup_corpus.py        # Quran corpus downloader
 ├── data/                      # Corpus data (gitignored)
-├── docs/                      # Documentation
-│   └── context.md             # Architecture reference
 ├── pyproject.toml             # Project metadata & tool config
 ├── requirements.txt           # pip dependencies
 └── .env.example               # Environment variable template
