@@ -1,0 +1,68 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# =============================================================================
+# Virtual environments
+# =============================================================================
+venv/
+.venv/
+env/
+.env
+
+# =============================================================================
+# IDE / Editor
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Project-specific
+# =============================================================================
+
+# Downloaded corpus (re-download via: python scripts/setup_corpus.py)
+data/quran.json
+
+# Runtime outputs
+logs/
+cache/
+*.log
+
+# Transcript outputs (generated, not tracked)
+transcript*.txt
+transcript*.json
+transcript*.srt
+flagged*.txt
+
+# Model cache
+.cache/
+models/
+
+# Jupyter / Colab
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment files with secrets
+.env

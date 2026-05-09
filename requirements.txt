@@ -1,0 +1,21 @@
+# Core transcription
+faster-whisper==1.1.1
+
+# Language detection
+langdetect==1.0.9
+lingua-language-detector==2.0.2   # fallback / higher accuracy
+
+# Fuzzy matching for Hadith
+rapidfuzz==3.9.7
+
+# HTTP requests (Sunnah.com API)
+requests==2.32.3
+
+# Utility
+tqdm==4.66.4
+colorama==0.4.6                   # coloured console output
+
+# GPU (install separately if not already present in CUDA env)
+# torch>=2.2.0+cu121              # already present on Colab T4 / local CUDA env
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12
