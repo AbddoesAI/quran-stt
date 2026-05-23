@@ -17,16 +17,14 @@ import hashlib
 import json
 import os
 import sys
-import requests
 from pathlib import Path
 
+import requests
 
 __all__ = ["download_corpus"]
 
 # jsDelivr CDN mirror — no GitHub auth required, works in Colab.
-CORPUS_URL = (
-    "https://cdn.jsdelivr.net/npm/quran-json@3.1.2/dist/quran.json"
-)
+CORPUS_URL = "https://cdn.jsdelivr.net/npm/quran-json@3.1.2/dist/quran.json"
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 DATA_DIR = str(Path(DATA_DIR).resolve())  # Fix 11: sanitize path
@@ -88,7 +86,7 @@ def download_corpus() -> None:
     print(f"  SHA-256: {actual_sha}")
     if EXPECTED_SHA256 is None:
         print(
-            f"  TIP: Set EXPECTED_SHA256 = \"{actual_sha}\" in setup_corpus.py "
+            f'  TIP: Set EXPECTED_SHA256 = "{actual_sha}" in setup_corpus.py '
             f"to enable integrity checks on future downloads."
         )
     _validate(OUTPUT_PATH)

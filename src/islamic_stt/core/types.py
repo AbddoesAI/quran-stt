@@ -20,6 +20,7 @@ __all__ = ["TranscriptSegment", "WordTimestamp"]
 @dataclass(slots=True)
 class WordTimestamp:
     """A single transcribed word with its timing and confidence."""
+
     word: str
     start: float
     end: float
@@ -45,6 +46,7 @@ class TranscriptSegment:
     no_speech_prob : probability that the segment contains no speech.
     avg_word_confidence : mean of word-level probabilities (0.0–1.0).
     """
+
     id: int
     start: float
     end: float
@@ -55,3 +57,11 @@ class TranscriptSegment:
     words: list[WordTimestamp] = field(default_factory=list)
     no_speech_prob: float = 0.0
     avg_word_confidence: float = 0.0
+    compression_ratio: float = 0.0
+    mixed_script_ratio: float = 0.0
+    repeated_ngram_score: float = 0.0
+    prompt_safe: bool = False
+    retry_triggered: bool = False
+    retry_reason: list[str] = field(default_factory=list)
+    original_text: str | None = None
+    confidence_delta: float = 0.0

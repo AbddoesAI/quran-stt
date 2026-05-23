@@ -9,8 +9,12 @@ from islamic_stt.core.transcriber import TranscriptSegment
 def _seg(id: int, start: float, end: float, text: str, lang: str = "en") -> TranscriptSegment:
     """Helper to create a minimal TranscriptSegment."""
     return TranscriptSegment(
-        id=id, start=start, end=end, text=text,
-        language=lang, language_probability=0.9,
+        id=id,
+        start=start,
+        end=end,
+        text=text,
+        language=lang,
+        language_probability=0.9,
     )
 
 

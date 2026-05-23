@@ -23,14 +23,30 @@ import logging
 import os
 import re
 
-from faster_whisper import WhisperModel
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - only used in minimal test environments
+
+    class tqdm:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            self.n = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def update(self, n: int) -> None:
+            self.n += n
+
 
 from islamic_stt.core.arabic_utils import (
-    normalise_arabic,
-    HALLUCINATION_PHRASES_NORMALISED,
     HALLUCINATION_PATTERNS,
+    HALLUCINATION_PHRASES_NORMALISED,
+    normalise_arabic,
 )
+
 # P0 fix: Import shared types from types.py to break circular import
 from islamic_stt.core.types import TranscriptSegment, WordTimestamp
 
@@ -46,6 +62,7 @@ _WS_RE = re.compile(r"\s+")
 # Transcriber
 # ---------------------------------------------------------------------------
 
+
 class Transcriber:
     """
     Loads faster-whisper large-v3 once and exposes a single `transcribe()`
@@ -59,6 +76,14 @@ class Transcriber:
         compute_type: str = "float16",
         download_root: str | None = None,
     ) -> None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "faster-whisper is required for transcription. Install the project "
+                "dependencies before running the STT pipeline."
+            ) from exc
+
         if device == "cpu" and compute_type == "float16":
             compute_type = "int8"
             logger.info("CPU detected — switching compute_type to int8.")
@@ -84,7 +109,7 @@ class Transcriber:
         beam_size: int = 8,
         best_of: int = 5,
         patience: float = 1.5,
-        language: str | None = "ur",
+        language: str | None = None,
         vad_filter: bool = True,
         vad_parameters: dict | None = None,
         no_speech_threshold: float = 0.6,
@@ -134,7 +159,9 @@ class Transcriber:
 
         logger.info(
             "Audio duration: %.1fs | Detected language: %s (p=%.2f)",
-            info.duration, info.language, info.language_probability,
+            info.duration,
+            info.language,
+            info.language_probability,
         )
 
         transcript: list[TranscriptSegment] = []
@@ -157,10 +184,7 @@ class Transcriber:
                             )
                         )
 
-                avg_wc = (
-                    sum(w.probability for w in words) / len(words)
-                    if words else 0.0
-                )
+                avg_wc = sum(w.probability for w in words) / len(words) if words else 0.0
 
                 seg = TranscriptSegment(
                     id=raw_seg.id,
@@ -186,6 +210,98 @@ class Transcriber:
         logger.info("Done — %d segment(s) after cleanup.", len(transcript))
         return transcript
 
+    def transcribe_range(
+        self,
+        audio_path: str,
+        start_s: float,
+        end_s: float,
+        *,
+        beam_size: int = 8,
+        best_of: int = 5,
+        patience: float = 1.5,
+        language: str | None = None,
+        vad_filter: bool = True,
+        vad_parameters: dict | None = None,
+        no_speech_threshold: float = 0.6,
+        condition_on_previous_text: bool = False,
+        initial_prompt: str | None = None,
+        log_prob_threshold: float = -0.8,
+        compression_ratio_threshold: float = 2.0,
+        hallucination_silence_threshold: float | None = 1.0,
+        repetition_penalty: float = 1.2,
+        no_repeat_ngram_size: int = 3,
+        temperature: tuple[float, ...] | float = (0.0, 0.2),
+    ) -> list[TranscriptSegment]:
+        """
+        Transcribe a time slice of *audio_path* (seconds). Segment timestamps
+        are offset to absolute file time.
+        """
+        start_s = max(0.0, start_s)
+        end_s = max(start_s + 0.05, end_s)
+        clip = f"{start_s:.3f},{end_s:.3f}"
+
+        if vad_parameters is None:
+            vad_parameters = {
+                "min_silence_duration_ms": 500,
+                "speech_pad_ms": 300,
+            }
+
+        segments_gen, info = self.model.transcribe(
+            audio_path,
+            task="transcribe",
+            beam_size=beam_size,
+            best_of=best_of,
+            patience=patience,
+            language=language,
+            word_timestamps=True,
+            vad_filter=vad_filter,
+            vad_parameters=vad_parameters,
+            condition_on_previous_text=condition_on_previous_text,
+            initial_prompt=initial_prompt,
+            no_speech_threshold=no_speech_threshold,
+            log_prob_threshold=log_prob_threshold,
+            compression_ratio_threshold=compression_ratio_threshold,
+            hallucination_silence_threshold=hallucination_silence_threshold,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            temperature=list(temperature) if isinstance(temperature, tuple) else temperature,
+            clip_timestamps=clip,
+        )
+
+        transcript: list[TranscriptSegment] = []
+        for raw_seg in segments_gen:
+            words: list[WordTimestamp] = []
+            if raw_seg.words:
+                for w in raw_seg.words:
+                    words.append(
+                        WordTimestamp(
+                            word=w.word,
+                            start=start_s + w.start,
+                            end=start_s + w.end,
+                            probability=w.probability,
+                        )
+                    )
+            avg_wc = sum(w.probability for w in words) / len(words) if words else 0.0
+            transcript.append(
+                TranscriptSegment(
+                    id=raw_seg.id,
+                    start=start_s + raw_seg.start,
+                    end=start_s + raw_seg.end,
+                    text=raw_seg.text.strip(),
+                    language=info.language,
+                    language_probability=info.language_probability,
+                    avg_logprob=raw_seg.avg_logprob,
+                    words=words,
+                    no_speech_prob=raw_seg.no_speech_prob,
+                    avg_word_confidence=avg_wc,
+                )
+            )
+
+        transcript = _deduplicate_segments(transcript)
+        transcript = _drop_hallucination_phrases(transcript)
+        transcript = _drop_hallucination_patterns(transcript)
+        return transcript
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -205,34 +321,38 @@ class Transcriber:
 # ---------------------------------------------------------------------------
 # Islamic formula whitelist — these are legitimately repeated in lectures
 # ---------------------------------------------------------------------------
-_ISLAMIC_FORMULA_DEDUP_WHITELIST: frozenset[str] = frozenset({
-    normalise_arabic(p) for p in [
-        "صلى الله عليه وسلم",
-        "سبحان الله",
-        "الحمد لله",
-        "الله اكبر",
-        "لا اله الا الله",
-        "استغفر الله",
-        "رضي الله عنه",
-        "رضي الله عنها",
-        "رحمه الله",
-        "سبحانه وتعالى",
-        "عز وجل",
-        "ان شاء الله",
-        "ما شاء الله",
-        "بسم الله الرحمن الرحيم",
-        "جزاك الله خيرا",
-        "بارك الله فيك",
-        "لا حول ولا قوة الا بالله",
-        "حسبنا الله ونعم الوكيل",
-        "انا لله وانا اليه راجعون",
-    ]
-})
+_ISLAMIC_FORMULA_DEDUP_WHITELIST: frozenset[str] = frozenset(
+    {
+        normalise_arabic(p)
+        for p in [
+            "صلى الله عليه وسلم",
+            "سبحان الله",
+            "الحمد لله",
+            "الله اكبر",
+            "لا اله الا الله",
+            "استغفر الله",
+            "رضي الله عنه",
+            "رضي الله عنها",
+            "رحمه الله",
+            "سبحانه وتعالى",
+            "عز وجل",
+            "ان شاء الله",
+            "ما شاء الله",
+            "بسم الله الرحمن الرحيم",
+            "جزاك الله خيرا",
+            "بارك الله فيك",
+            "لا حول ولا قوة الا بالله",
+            "حسبنا الله ونعم الوكيل",
+            "انا لله وانا اليه راجعون",
+        ]
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Hallucination deduplication (CRIT-5 fix: 120s → 8s + whitelist)
 # ---------------------------------------------------------------------------
+
 
 def _make_dedup_key(text: str) -> str:
     """Normalise whitespace and case for dedup comparison."""
@@ -281,7 +401,8 @@ def _deduplicate_segments(segments: list[TranscriptSegment]) -> list[TranscriptS
     if collapsed:
         logger.info(
             "Hallucination deduplication: removed %d repeated segment(s), %d remain.",
-            collapsed, len(deduped),
+            collapsed,
+            len(deduped),
         )
 
     return deduped

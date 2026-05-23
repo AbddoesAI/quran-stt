@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from islamic_stt.core.transcriber import TranscriptSegment, WordTimestamp
+from islamic_stt.core.transcriber import TranscriptSegment
 
 
 @pytest.fixture

@@ -29,10 +29,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import List
 
-from islamic_stt.core.types import TranscriptSegment
 from islamic_stt.core.transcriber import Transcriber
+from islamic_stt.core.types import TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +45,7 @@ _DIVIDER = "─" * 72
 @dataclass(frozen=True, slots=True)
 class _FlaggedEntry:
     """Internal typed container for a single flagged segment."""
+
     segment: TranscriptSegment
     reason: str
 
@@ -133,7 +133,8 @@ class FlaggedHandler:
 
         logger.info(
             "%d flagged segment(s) written → %s",
-            len(self._entries), self.flagged_path,
+            len(self._entries),
+            self.flagged_path,
         )
 
     # ------------------------------------------------------------------
@@ -149,6 +150,7 @@ class FlaggedHandler:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _wrap_word_detail(line: str, width: int = 72, indent_width: int = 11) -> str:
     """

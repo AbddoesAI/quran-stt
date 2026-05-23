@@ -16,7 +16,6 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-
 _LOG_DIR = "logs"
 _LOG_FILE = os.path.join(_LOG_DIR, "islamic_stt.log")
 _MAX_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -59,9 +58,7 @@ def configure_logging(level: int = logging.INFO, *, log_to_file: bool = True) ->
             encoding="utf-8",
         )
         file_handler.setLevel(logging.DEBUG)  # always capture debug to file
-        file_handler.setFormatter(
-            logging.Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
-        )
+        file_handler.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
         root.addHandler(file_handler)
 
     # Silence noisy third-party loggers

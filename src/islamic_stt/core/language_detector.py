@@ -27,14 +27,30 @@ from __future__ import annotations
 
 import logging
 import re
+
 from islamic_stt.core.arabic_utils import normalise_arabic
 
 logger = logging.getLogger(__name__)
 
 # langdetect — seed for deterministic results across runs (MED-5 fix)
-from langdetect import detect_langs, LangDetectException
-from langdetect import DetectorFactory
-DetectorFactory.seed = 0
+try:
+    from langdetect import DetectorFactory, LangDetectException, detect_langs
+
+    DetectorFactory.seed = 0
+    _LANGDETECT_AVAILABLE = True
+except ImportError:
+    _LANGDETECT_AVAILABLE = False
+
+    class LangDetectException(Exception):
+        pass
+
+    def detect_langs(text: str):  # type: ignore[no-untyped-def]
+        raise LangDetectException("langdetect is not installed")
+
+    logger.warning(
+        "langdetect not available — using script/vocabulary heuristics only. "
+        "Install dependencies for best multilingual accuracy."
+    )
 
 __all__ = ["detect_language"]
 
@@ -47,6 +63,7 @@ try:
             Language.ARABIC,
             Language.URDU,
             Language.ENGLISH,
+            Language.PERSIAN,
         )
         .with_minimum_relative_distance(0.15)
         .build()
@@ -77,6 +94,7 @@ _LINGUA_TO_ISO: dict[str, str] = {
     "ARABIC": "ar",
     "URDU": "ur",
     "ENGLISH": "en",
+    "PERSIAN": "fa",
 }
 
 # Arabic Unicode block range: U+0600 – U+06FF
@@ -86,57 +104,220 @@ _ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
 # standard Arabic characters (without Urdu-exclusive code points).  These
 # words almost never appear in Classical or Quranic Arabic.
 # The list is deliberately broad to catch conversational Urdu lectures.
-_URDU_VOCAB: frozenset[str] = frozenset({
-    # Pronouns & demonstratives
-    "ہے", "ہیں", "ہو", "ہوں", "ہوگا", "ہوگی",
-    "یہ", "وہ", "کیا", "کون", "کہاں", "کب", "کیسے", "کیوں",
-    "ہم", "تم", "آپ", "مجھے", "تجھے", "انہوں",
-    # Postpositions / particles
-    "کی", "کا", "کو", "کے", "سے", "میں", "پر", "نے", "تک",
-    "کیلئے", "کیساتھ", "کیبعد", "لئے", "ساتھ", "بعد",
-    # Verbs / auxiliaries
-    "کرنا", "کرتا", "کرتے", "کریں", "رہا", "رہے", "رہی",
-    "ہوتا", "ہوتی", "ہوتے", "جاتا", "جاتے", "آتا", "آتے",
-    "دیکھنا", "دیکھو", "دیکھیں", "دیکھا", "دیکھتے",
-    "سمجھنا", "سمجھو", "سمجھیں", "سمجھا", "سمجھتے",
-    "سوچنا", "سوچو", "سوچیں", "سوچا",
-    "بتانا", "بتاؤ", "بتائیں", "بتایا",
-    "سننا", "سنو", "سنیں", "سنا", "سنتے",
-    "پڑھنا", "پڑھو", "پڑھیں", "پڑھا", "پڑھتے",
-    "ملنا", "ملا", "ملتا", "ملے", "ملیں",
-    "چاہنا", "چاہتا", "چاہتے", "چاہیے",
-    "سکتا", "سکتے", "سکتی", "سکیں",
-    "دینا", "دیتا", "دیتے", "دیں", "دیا",
-    "لینا", "لیتا", "لیتے", "لیا",
-    "آنا", "آئے", "آئیں", "آیا",
-    "جانا", "جائے", "جائیں", "گیا", "گئے", "گئی",
-    # Common conversational words
-    "لوگ", "لوگوں", "بہت", "ابھی", "بھی", "نہیں", "ہاں",
-    "لیکن", "مگر", "اور", "پھر", "تو", "جب", "اگر",
-    "والا", "والے", "والی", "اچھا", "اچھے", "بات",
-    "ضرور", "شاید", "بالکل", "کبھی", "ہمیشہ", "ابھی",
-    "یعنی", "مثلاً", "خاص", "صرف", "سب", "کچھ",
-    "وجہ", "طرف", "طریقہ", "مطلب", "حکم", "خیال",
-    # Religious Urdu terms (look Arabic but used in Urdu context)
-    "نماز", "روزہ", "زکوٰة", "حج", "مسجد", "مدرسہ",
-    "مولانا", "صاحب", "حضور", "بیان", "خطبہ", "درس",
-    "عالم", "مفتی", "علماء", "فتویٰ", "تبلیغ",
-    # Time / quantity words
-    "آج", "کل", "پہلے", "بعد", "ابھی", "اب",
-    "پہلا", "دوسرا", "تیسرا", "چوتھا",
-    "ایک", "دو", "تین", "چار", "پانچ",
-    # Whisper-romanised Urdu (Arabic script, no Urdu codepoints)
-    "هوتا", "هوتي", "هونا", "كرنا", "كرتا", "كرتي",
-    "لوگ", "بهت", "نهيں", "كيا", "كيوں", "ليكن",
-    "هاں", "بهي", "ابهي", "پهر", "اچها",
-    # Mixed-script tokens observed in real Whisper output
-    "خواهش", "دروازة", "روتين", "باكستان",
-})
+_URDU_VOCAB: frozenset[str] = frozenset(
+    {
+        # Pronouns & demonstratives
+        "ہے",
+        "ہیں",
+        "ہو",
+        "ہوں",
+        "ہوگا",
+        "ہوگی",
+        "یہ",
+        "وہ",
+        "کیا",
+        "کون",
+        "کہاں",
+        "کب",
+        "کیسے",
+        "کیوں",
+        "ہم",
+        "تم",
+        "آپ",
+        "مجھے",
+        "تجھے",
+        "انہوں",
+        # Postpositions / particles
+        "کی",
+        "کا",
+        "کو",
+        "کے",
+        "سے",
+        "میں",
+        "پر",
+        "نے",
+        "تک",
+        "کیلئے",
+        "کیساتھ",
+        "کیبعد",
+        "لئے",
+        "ساتھ",
+        "بعد",
+        # Verbs / auxiliaries
+        "کرنا",
+        "کرتا",
+        "کرتے",
+        "کریں",
+        "رہا",
+        "رہے",
+        "رہی",
+        "ہوتا",
+        "ہوتی",
+        "ہوتے",
+        "جاتا",
+        "جاتے",
+        "آتا",
+        "آتے",
+        "دیکھنا",
+        "دیکھو",
+        "دیکھیں",
+        "دیکھا",
+        "دیکھتے",
+        "سمجھنا",
+        "سمجھو",
+        "سمجھیں",
+        "سمجھا",
+        "سمجھتے",
+        "سوچنا",
+        "سوچو",
+        "سوچیں",
+        "سوچا",
+        "بتانا",
+        "بتاؤ",
+        "بتائیں",
+        "بتایا",
+        "سننا",
+        "سنو",
+        "سنیں",
+        "سنا",
+        "سنتے",
+        "پڑھنا",
+        "پڑھو",
+        "پڑھیں",
+        "پڑھا",
+        "پڑھتے",
+        "ملنا",
+        "ملا",
+        "ملتا",
+        "ملے",
+        "ملیں",
+        "چاہنا",
+        "چاہتا",
+        "چاہتے",
+        "چاہیے",
+        "سکتا",
+        "سکتے",
+        "سکتی",
+        "سکیں",
+        "دینا",
+        "دیتا",
+        "دیتے",
+        "دیں",
+        "دیا",
+        "لینا",
+        "لیتا",
+        "لیتے",
+        "لیا",
+        "آنا",
+        "آئے",
+        "آئیں",
+        "آیا",
+        "جانا",
+        "جائے",
+        "جائیں",
+        "گیا",
+        "گئے",
+        "گئی",
+        # Common conversational words
+        "لوگ",
+        "لوگوں",
+        "بہت",
+        "ابھی",
+        "بھی",
+        "نہیں",
+        "ہاں",
+        "لیکن",
+        "مگر",
+        "اور",
+        "پھر",
+        "تو",
+        "جب",
+        "اگر",
+        "والا",
+        "والے",
+        "والی",
+        "اچھا",
+        "اچھے",
+        "بات",
+        "ضرور",
+        "شاید",
+        "بالکل",
+        "کبھی",
+        "ہمیشہ",
+        "یعنی",
+        "مثلاً",
+        "خاص",
+        "صرف",
+        "سب",
+        "کچھ",
+        "وجہ",
+        "طرف",
+        "طریقہ",
+        "مطلب",
+        "حکم",
+        "خیال",
+        # Religious Urdu terms (look Arabic but used in Urdu context)
+        "نماز",
+        "روزہ",
+        "زکوٰة",
+        "حج",
+        "مسجد",
+        "مدرسہ",
+        "مولانا",
+        "صاحب",
+        "حضور",
+        "بیان",
+        "خطبہ",
+        "درس",
+        "عالم",
+        "مفتی",
+        "علماء",
+        "فتویٰ",
+        "تبلیغ",
+        # Time / quantity words
+        "آج",
+        "کل",
+        "پہلے",
+        "اب",
+        "پہلا",
+        "دوسرا",
+        "تیسرا",
+        "چوتھا",
+        "ایک",
+        "دو",
+        "تین",
+        "چار",
+        "پانچ",
+        # Whisper-romanised Urdu (Arabic script, no Urdu codepoints)
+        "هوتا",
+        "هوتي",
+        "هونا",
+        "كرنا",
+        "كرتا",
+        "كرتي",
+        "بهت",
+        "نهيں",
+        "كيا",
+        "كيوں",
+        "ليكن",
+        "هاں",
+        "بهي",
+        "ابهي",
+        "پهر",
+        "اچها",
+        # Mixed-script tokens observed in real Whisper output
+        "خواهش",
+        "دروازة",
+        "روتين",
+        "باكستان",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def detect_language(
     segment_text: str,
@@ -199,6 +380,11 @@ def detect_language(
         if lingua_code != "und":
             return lingua_code
 
+    if _ARABIC_SCRIPT_RE.search(text):
+        return "ur" if _is_likely_urdu(text, pre_normalised=pre_normalised) else "ar"
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+
     # Return whatever langdetect gave us (best effort)
     return langdetect_result["language"] or "und"
 
@@ -206,6 +392,7 @@ def detect_language(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalise_whisper_code(code: str) -> str:
     """Map Whisper language codes to our canonical ISO-639-1 set."""
@@ -268,7 +455,10 @@ def _resolve_arabic_urdu(text: str) -> str:
 
 
 # Pre-compiled regex for Urdu-exclusive characters.
-_URDU_EXCLUSIVE_RE = re.compile(r"[\u0679\u0688\u0691\u06BA\u06BE\u06D2\u06D3\u06D4]")
+_URDU_EXCLUSIVE_RE = re.compile(
+    r"[\u0679\u067E\u0686\u0688\u0691\u0698\u06A9\u06AF"
+    r"\u06BA\u06BE\u06C1\u06C3\u06CC\u06D2\u06D3\u06D4]"
+)
 
 
 def _is_likely_urdu(text: str, *, pre_normalised: str | None = None) -> bool:
@@ -295,7 +485,4 @@ def _is_likely_urdu(text: str, *, pre_normalised: str | None = None) -> bool:
     norm = pre_normalised if pre_normalised is not None else normalise_arabic(text)
     words = set(norm.split())
     urdu_hits = words & _URDU_VOCAB
-    if len(urdu_hits) >= 2:
-        return True
-
-    return False
+    return len(urdu_hits) >= 2

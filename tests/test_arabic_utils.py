@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from islamic_stt.core.arabic_utils import (
+    HALLUCINATION_PHRASES_NORMALISED,
+    HALLUCINATION_PHRASES_RAW,
     contains_arabic_script,
     normalise_arabic,
     normalise_arabic_cached,
-    HALLUCINATION_PHRASES_NORMALISED,
-    HALLUCINATION_PHRASES_RAW,
 )
 
 
@@ -22,7 +22,10 @@ class TestNormaliseArabic:
 
     def test_tashkeel_stripping(self):
         # مُحَمَّد → محمد
-        assert normalise_arabic("\u0645\u064f\u062d\u064e\u0645\u0651\u064e\u062f") == "\u0645\u062d\u0645\u062f"
+        assert (
+            normalise_arabic("\u0645\u064f\u062d\u064e\u0645\u0651\u064e\u062f")
+            == "\u0645\u062d\u0645\u062f"
+        )
 
     def test_hamza_normalisation(self):
         # ؤ → و, ئ → ي

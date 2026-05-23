@@ -24,7 +24,14 @@ import re
 import unicodedata
 from functools import lru_cache
 
-__all__ = ["normalise_arabic", "normalise_arabic_cached", "contains_arabic_script"]
+__all__ = [
+    "normalise_arabic",
+    "normalise_arabic_cached",
+    "contains_arabic_script",
+    "extract_arabic_spans",
+    "canonicalise_for_matching",
+    "is_dominantly_arabic",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +55,7 @@ _TASHKEEL_RE = re.compile(
 # Arabic + Latin punctuation + Unicode bidi controls + zero-width chars
 _PUNCT_RE = re.compile(
     r"[،؛؟«»\u200F\u200E\u200B\u200C\u200D\uFEFF"
-    r'""\"\'`.,!?():\[\]{}⟨⟩﴾﴿؛٪\-–—/\\]'
+    r"""'"`.,!?():\[\]{}⟨⟩﴾﴿؛٪\u2018\u2019\u201C\u201D\-\u2013\u2014/\\]"""
 )
 
 # Alef variants → bare alef (ا)
@@ -59,26 +66,54 @@ _ALEF_VARIANTS_RE = re.compile(r"[أإآٱ]")
 #   U+0750–U+077F  (Arabic Supplement)
 #   U+FB50–U+FDFF  (Arabic Presentation Forms-A)
 #   U+FE70–U+FEFF  (Arabic Presentation Forms-B)
-_ARABIC_SCRIPT_RE = re.compile(
-    r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]"
-)
+_ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
 
 # Hamza-on-carrier normalization (O(1) via translate table)
-_HAMZA_TABLE = str.maketrans({
-    "\u0624": "\u0648",  # ؤ → و
-    "\u0626": "\u064A",  # ئ → ي
-})
+_HAMZA_TABLE = str.maketrans(
+    {
+        "\u0624": "\u0648",  # ؤ → و
+        "\u0626": "\u064a",  # ئ → ي
+    }
+)
 
 # Taa marbuta + alef maqsura (O(1) via translate table)
-_SUFFIX_TABLE = str.maketrans({
-    "\u0629": "\u0647",  # ة → ه
-    "\u0649": "\u064A",  # ى → ي
-})
+_SUFFIX_TABLE = str.maketrans(
+    {
+        "\u0629": "\u0647",  # ة → ه
+        "\u0649": "\u064a",  # ى → ي
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Cross-script canonical mapping (for matching ONLY — never transcript)
+# ---------------------------------------------------------------------------
+# Whisper outputs Arabic text using Urdu orthography (e.g. اللہ instead of
+# الله).  This table maps Urdu-script characters to their Arabic equivalents
+# so that the Quran corpus and formula dictionary can match.
+#
+# SAFETY:
+#   - NOT applied to transcript output text — would corrupt Urdu
+#   - Only used inside canonicalise_for_matching()
+#   - گ (Urdu Gaf) is NOT mapped to غ (Arabic Ghayn) — they are different
+#     letters.  Mapping them would cause catastrophic false Quran matches.
+#   - ے (Urdu Bari Yeh) is NOT mapped globally — it appears heavily in
+#     Urdu grammar (گئے, کیے, چاہیے).  Blind mapping creates false
+#     Arabic positives.
+
+_CROSS_SCRIPT_TABLE = str.maketrans(
+    {
+        "\u06c1": "\u0647",  # ہ (Urdu Heh Goal) → ه (Arabic Heh)
+        "\u06cc": "\u064a",  # ی (Urdu Yeh) → ي (Arabic Yeh)
+        "\u06a9": "\u0643",  # ک (Urdu Kaf) → ك (Arabic Kaf)
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def contains_arabic_script(text: str) -> bool:
     """Return True if *text* contains at least one Arabic-script character."""
@@ -122,6 +157,34 @@ def normalise_arabic(text: str) -> str:
     return text.strip()
 
 
+def canonicalise_for_matching(text: str) -> str:
+    """
+    Cross-script canonicalization for matching purposes ONLY.
+
+    Converts Urdu-script characters to Arabic equivalents so that
+    Whisper's Urdu-orthography Arabic output can match the Quran corpus
+    and formula dictionary.
+
+    Pipeline: cross-script table → normalise_arabic()
+
+    NEVER apply this to transcript output text — it will corrupt Urdu.
+    Use this ONLY in:
+      - QuranMatcher.match() for query canonicalization
+      - Formula dictionary key building
+      - HadithMatcher.match() for query canonicalization
+      - Overlap deduplication comparisons
+    """
+    if not text:
+        return ""
+    return normalise_arabic(text.translate(_CROSS_SCRIPT_TABLE))
+
+
+@lru_cache(maxsize=16384)
+def canonicalise_for_matching_cached(text: str) -> str:
+    """Cached wrapper around ``canonicalise_for_matching``."""
+    return canonicalise_for_matching(text)
+
+
 @lru_cache(maxsize=16384)
 def normalise_arabic_cached(text: str) -> str:
     """
@@ -148,52 +211,54 @@ def normalise_arabic_cached(text: str) -> str:
 # Expanded from 7 → 35+ phrases based on observed Whisper large-v3
 # hallucination patterns in Arabic/Urdu/English audio.
 
-HALLUCINATION_PHRASES_RAW: frozenset[str] = frozenset({
-    # --- Arabic YouTube-trained hallucinations ---
-    "اشتركوا في القناة",
-    "شكرا للمشاهدة",
-    "لا تنسوا الاشتراك",
-    "اشترك في القناة",
-    "شكراً للمشاهدة",
-    "لا تنسى الاشتراك والإعجاب",
-    "تابعونا على",
-    "اشتراك في القناة",
-    "لا تنسى الاشتراك في القناة",
-    "اشترك وفعل زر الجرس",
-    "اذا اعجبك الفيديو",
-    "لا تنسى الاشتراك",
-    "شكرا لكم على المشاهدة",
-    "مشاهدة ممتعة",
-    "نراكم في الحلقة القادمة",
-    "السلام عليكم ورحمة الله",  # only when isolated (not in context)
-    # --- English YouTube hallucinations ---
-    "Thanks for watching",
-    "Please subscribe",
-    "Don't forget to subscribe",
-    "Like and subscribe",
-    "Hit the bell icon",
-    "See you in the next video",
-    "Thank you for watching",
-    "Please like and subscribe",
-    # --- Urdu YouTube hallucinations ---
-    "چینل کو سبسکرائب کریں",
-    "لائک اور سبسکرائب کریں",
-    "ویڈیو کو لائک کریں",
-    # --- Whisper silence/noise hallucinations ---
-    "...",
-    "♪",
-    "♪♪",
-    "♪♪♪",
-    "[موسيقى]",
-    "[تصفيق]",
-    "[音楽]",
-    "MBC",
-    "Amara.org",
-    "www.mooji.org",
-    "Sous-titres réalisés par la communauté",
-    "ترجمة",
-    "Subtítulos",
-})
+HALLUCINATION_PHRASES_RAW: frozenset[str] = frozenset(
+    {
+        # --- Arabic YouTube-trained hallucinations ---
+        "اشتركوا في القناة",
+        "شكرا للمشاهدة",
+        "لا تنسوا الاشتراك",
+        "اشترك في القناة",
+        "شكراً للمشاهدة",
+        "لا تنسى الاشتراك والإعجاب",
+        "تابعونا على",
+        "اشتراك في القناة",
+        "لا تنسى الاشتراك في القناة",
+        "اشترك وفعل زر الجرس",
+        "اذا اعجبك الفيديو",
+        "لا تنسى الاشتراك",
+        "شكرا لكم على المشاهدة",
+        "مشاهدة ممتعة",
+        "نراكم في الحلقة القادمة",
+        "السلام عليكم ورحمة الله",  # only when isolated (not in context)
+        # --- English YouTube hallucinations ---
+        "Thanks for watching",
+        "Please subscribe",
+        "Don't forget to subscribe",
+        "Like and subscribe",
+        "Hit the bell icon",
+        "See you in the next video",
+        "Thank you for watching",
+        "Please like and subscribe",
+        # --- Urdu YouTube hallucinations ---
+        "چینل کو سبسکرائب کریں",
+        "لائک اور سبسکرائب کریں",
+        "ویڈیو کو لائک کریں",
+        # --- Whisper silence/noise hallucinations ---
+        "...",
+        "♪",
+        "♪♪",
+        "♪♪♪",
+        "[موسيقى]",
+        "[تصفيق]",
+        "[音楽]",
+        "MBC",
+        "Amara.org",
+        "www.mooji.org",
+        "Sous-titres réalisés par la communauté",
+        "ترجمة",
+        "Subtítulos",
+    }
+)
 
 HALLUCINATION_PHRASES_NORMALISED: frozenset[str] = frozenset(
     normalise_arabic(p) for p in HALLUCINATION_PHRASES_RAW
@@ -214,3 +279,143 @@ HALLUCINATION_PATTERNS: list[re.Pattern] = [
     # URL-like content
     re.compile(r"https?://|www\.|\.com|\.org"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Urdu-aware Arabic span extraction (review 3+4+5 + Colab fix)
+# ---------------------------------------------------------------------------
+
+# Urdu-exclusive codepoints: letters used in Urdu but not standard Arabic
+_URDU_EXCLUSIVE = frozenset(
+    "\u0679\u067e\u0686\u0688\u0691\u0698\u06a9\u06af\u06ba\u06be\u06c1\u06c3\u06cc\u06d2"
+)
+
+# Arabic morphology signals that help identify Arabic text even without
+# diacritics (Whisper typically strips them). Require BOTH a marker AND
+# a morphological signal to avoid false positives on Urdu text.
+_ARABIC_DEFINITE_ARTICLE_RE = re.compile(r"\bال\w{2,}")  # ال prefix (al-)
+_ARABIC_STOPWORDS = frozenset(
+    {
+        "من",
+        "في",
+        "على",
+        "الى",
+        "عن",
+        "ان",
+        "ما",
+        "لا",
+        "الا",
+        "هو",
+        "هي",
+        "هم",
+        "الذي",
+        "التي",
+        "الذين",
+        "كل",
+        "بعد",
+        "قبل",
+        "بين",
+        "عند",
+        "حتى",
+        "ثم",
+        "او",
+        "لم",
+        "لن",
+        "قد",
+    }
+)
+
+
+def extract_arabic_spans(text: str) -> list[str]:
+    """
+    Extract contiguous Arabic-script spans from mixed Urdu/Arabic text.
+
+    Tokenizes first, then builds spans from consecutive non-Urdu tokens.
+    Handles 'Urdu + Quran' as one continuous Arabic-script run without
+    discarding the entire run when a single Urdu character appears.
+
+    Acceptance criteria (at least one must be true):
+      - Has diacritics (tashkeel) — strong classical Arabic signal
+      - Has hamza characters (أ إ ؤ ئ)
+      - Has taa marbuta (ة) or alef maqsura (ى)
+      - 5+ words (long enough to be meaningful regardless)
+      - 3+ words AND Arabic morphology signals (ال prefix + stopwords)
+      - 2+ words AND at least 2 Arabic morphology signals
+    """
+    tokens = text.split()
+    spans: list[str] = []
+    current_arabic: list[str] = []
+
+    for token in tokens:
+        # Check if this token contains Arabic-script characters
+        if not any("\u0600" <= c <= "\u06ff" or "\ufb50" <= c <= "\ufdff" for c in token):
+            # Non-Arabic token: flush current span if long enough
+            if len(current_arabic) >= 2:
+                spans.append(" ".join(current_arabic))
+            current_arabic = []
+            continue
+
+        # Check if token contains Urdu-exclusive characters
+        if any(c in _URDU_EXCLUSIVE for c in token):
+            # Urdu token: flush current span
+            if len(current_arabic) >= 2:
+                spans.append(" ".join(current_arabic))
+            current_arabic = []
+        else:
+            current_arabic.append(token)
+
+    # Flush remaining
+    if len(current_arabic) >= 2:
+        spans.append(" ".join(current_arabic))
+
+    # Filter: require Arabic signals to accept the span
+    filtered: list[str] = []
+    for span in spans:
+        has_diacritics = bool(re.search(r"[\u064B-\u065F\u0670]", span))
+        has_hamza = bool(re.search(r"[\u0624\u0626\u0623\u0625]", span))
+        has_classical = bool(re.search(r"[\u0629\u0649]", span))
+        word_count = len(span.split())
+
+        # Strong signals: always accept
+        if has_diacritics or has_hamza or has_classical or word_count >= 5:
+            filtered.append(span)
+            continue
+
+        # Medium signals: Arabic morphology (ال prefix + stopwords)
+        span_words = set(span.split())
+        al_count = len(_ARABIC_DEFINITE_ARTICLE_RE.findall(span))
+        stopword_hits = len(span_words & _ARABIC_STOPWORDS)
+        morphology_signals = al_count + stopword_hits
+
+        if (
+            word_count >= 3
+            and morphology_signals >= 1
+            or word_count >= 2
+            and morphology_signals >= 2
+        ):
+            filtered.append(span)
+
+    return filtered
+
+
+def is_dominantly_arabic(text: str) -> bool:
+    """True when Arabic-script characters dominate and Urdu signals are weak."""
+    if not text:
+        return False
+    arabic_chars = 0
+    urdu_exclusive_chars = 0
+    total_script_chars = 0
+    for c in text:
+        if "\u0600" <= c <= "\u06ff" or "\ufb50" <= c <= "\ufdff":
+            total_script_chars += 1
+            if c in _URDU_EXCLUSIVE:
+                urdu_exclusive_chars += 1
+            else:
+                arabic_chars += 1
+        elif c.isalpha():
+            total_script_chars += 1
+    if total_script_chars == 0:
+        return False
+    arabic_ratio = arabic_chars / total_script_chars
+    urdu_ratio = urdu_exclusive_chars / max(arabic_chars + urdu_exclusive_chars, 1)
+    return arabic_ratio > 0.60 and urdu_ratio < 0.20

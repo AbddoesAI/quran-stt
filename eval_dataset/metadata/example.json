@@ -1,0 +1,7 @@
+{
+  "file": "lecture_01.wav",
+  "type": "urdu_bayan",
+  "languages": ["ur", "ar"],
+  "reference": "lecture_01.txt",
+  "noise": "low"
+}

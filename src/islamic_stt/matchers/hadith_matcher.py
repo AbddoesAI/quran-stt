@@ -42,7 +42,6 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 from rapidfuzz import fuzz
@@ -60,11 +59,13 @@ __all__ = ["HadithMatcher", "HadithMatch"]
 # ---------------------------------------------------------------------------
 
 SUNNAH_API_BASE = "https://api.sunnah.com/v1"
-SUNNAH_API_KEY_ENV = "SUNNAH_API_KEY"    # set this in your shell / Colab secrets
+SUNNAH_API_KEY_ENV = "SUNNAH_API_KEY"  # set this in your shell / Colab secrets
 
 # Minimum rapidfuzz partial_ratio score (0–100) to accept a hadith match.
-FUZZY_THRESHOLD = 78   # slightly lower than Quran threshold; hadith transcription
-                       # is noisier (chain text, narrator names, etc.)
+FUZZY_THRESHOLD = 78  # slightly lower than Quran threshold; hadith transcription
+# is noisier (chain text, narrator names, etc.)
+TOKEN_SET_THRESHOLD = 82
+MIN_DISTINCTIVE_TOKENS = 3
 
 # How many API results to retrieve per query.
 _SEARCH_LIMIT = 5
@@ -74,13 +75,40 @@ _REQUEST_DELAY = 1.0
 
 # Retry settings for 429 / transient errors.
 _MAX_RETRIES = 3
-_BACKOFF_BASE = 2.0     # seconds; doubles on each retry
+_BACKOFF_BASE = 2.0  # seconds; doubles on each retry
 
 _CACHE_PATH_ENV = "HADITH_CACHE_PATH"
 
 # diskcache settings (Fix 1)
-_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30   # 30-day TTL per entry
-_CACHE_SIZE_LIMIT = 256 * 1024 * 1024     # 256 MB max on-disk size
+_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30  # 30-day TTL per entry
+_CACHE_SIZE_LIMIT = 256 * 1024 * 1024  # 256 MB max on-disk size
+
+_GENERIC_HADITH_WORDS = frozenset(
+    {
+        "قال",
+        "رسول",
+        "الله",
+        "صلي",
+        "عليه",
+        "وسلم",
+        "النبي",
+        "عن",
+        "حدثنا",
+        "اخبرنا",
+        "سمعت",
+        "يقول",
+        "رضي",
+        "تعالي",
+    }
+)
+
+
+def _distinctive_token_count(query_normalised: str) -> int:
+    return sum(
+        1
+        for token in query_normalised.split()
+        if len(token) >= 3 and token not in _GENERIC_HADITH_WORDS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +117,7 @@ _CACHE_SIZE_LIMIT = 256 * 1024 * 1024     # 256 MB max on-disk size
 
 try:
     import httpx as _httpx
+
     _HTTPX_AVAILABLE = True
 except ImportError:
     _HTTPX_AVAILABLE = False
@@ -101,6 +130,7 @@ except ImportError:
 
 try:
     import diskcache as _diskcache
+
     _DISKCACHE_AVAILABLE = True
 except ImportError:
     _DISKCACHE_AVAILABLE = False
@@ -115,19 +145,21 @@ except ImportError:
 # Data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class HadithMatch:
-    collection: str           # e.g. "bukhari", "muslim"
-    hadith_number: str        # as returned by the API
-    arabic_text: str          # original Arabic body from API
-    english_text: str         # English translation (useful for verification)
-    matched_text: str         # what the transcription contained
-    confidence: float         # 0.0 – 1.0
+    collection: str  # e.g. "bukhari", "muslim"
+    hadith_number: str  # as returned by the API
+    arabic_text: str  # original Arabic body from API
+    english_text: str  # English translation (useful for verification)
+    matched_text: str  # what the transcription contained
+    confidence: float  # 0.0 – 1.0
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 class HadithMatcher:
     """
@@ -164,6 +196,7 @@ class HadithMatcher:
         )
         # Tune connection pool to match caller's worker count (Fix OPT-5)
         from requests.adapters import HTTPAdapter
+
         _adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
         self._session.mount("https://", _adapter)
 
@@ -196,7 +229,7 @@ class HadithMatcher:
         if _DISKCACHE_AVAILABLE and isinstance(self._cache, _diskcache.Cache):
             self._cache.close()
 
-    def __enter__(self) -> "HadithMatcher":
+    def __enter__(self) -> HadithMatcher:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -216,6 +249,8 @@ class HadithMatcher:
             return None
 
         query_normalised = normalise_arabic(text)
+        if _distinctive_token_count(query_normalised) < MIN_DISTINCTIVE_TOKENS:
+            return None
         candidates = self._cached_search(query_normalised)
         return self._score_candidates(candidates, text, query_normalised)
 
@@ -252,6 +287,8 @@ class HadithMatcher:
             query = normalise_arabic(text)
             if len(query) < 12:
                 return None
+            if _distinctive_token_count(query) < MIN_DISTINCTIVE_TOKENS:
+                return None
 
             # Check cache first (diskcache is sync but fast enough here)
             cached = self._cache_get(query)
@@ -269,14 +306,14 @@ class HadithMatcher:
                         self._cache_set(query, data)
                         return self._score_candidates(data, text, query)
                     if r.status_code == 429:
-                        wait = _BACKOFF_BASE ** attempt
+                        wait = _BACKOFF_BASE**attempt
                         logger.warning("Rate limited. Waiting %ds …", int(wait))
                         await asyncio.sleep(wait)
                         continue
                     logger.error("API error %d", r.status_code)
                     return None
                 except Exception as exc:
-                    wait = _BACKOFF_BASE ** attempt
+                    wait = _BACKOFF_BASE**attempt
                     logger.warning("Network error (%s). Retry in %ds …", exc, int(wait))
                     await asyncio.sleep(wait)
 
@@ -340,7 +377,11 @@ class HadithMatcher:
             if not arabic_body:
                 continue
             corpus_normalised = normalise_arabic(arabic_body)
-            score = fuzz.partial_ratio(query_normalised, corpus_normalised)
+            partial_score = fuzz.partial_ratio(query_normalised, corpus_normalised)
+            token_set_score = fuzz.token_set_ratio(query_normalised, corpus_normalised)
+            if token_set_score < TOKEN_SET_THRESHOLD:
+                continue
+            score = 0.55 * partial_score + 0.45 * token_set_score
             if score > best_score:
                 best_score = score
                 english_body = hadith.get("english", {}).get("body", "")
@@ -380,25 +421,29 @@ class HadithMatcher:
                     return data.get("data", [])
 
                 if response.status_code == 429:
-                    wait = _BACKOFF_BASE ** attempt
+                    wait = _BACKOFF_BASE**attempt
                     logger.warning(
                         "Rate limited. Waiting %ds (attempt %d/%d) …",
-                        int(wait), attempt, _MAX_RETRIES,
+                        int(wait),
+                        attempt,
+                        _MAX_RETRIES,
                     )
                     time.sleep(wait)
                     continue
 
                 logger.error(
                     "API error %d: %s",
-                    response.status_code, response.text[:200],
+                    response.status_code,
+                    response.text[:200],
                 )
                 return []
 
             except requests.RequestException as exc:
-                wait = _BACKOFF_BASE ** attempt
+                wait = _BACKOFF_BASE**attempt
                 logger.warning(
                     "Network error (%s). Retrying in %ds …",
-                    exc, int(wait),
+                    exc,
+                    int(wait),
                 )
                 time.sleep(wait)
 

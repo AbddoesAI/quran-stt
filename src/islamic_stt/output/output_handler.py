@@ -36,12 +36,12 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import asdict, dataclass, field
-from typing import Iterable
+from dataclasses import asdict, dataclass
 
-from islamic_stt.core.types import TranscriptSegment
 from islamic_stt.core.transcriber import Transcriber
+from islamic_stt.core.types import TranscriptSegment
 from islamic_stt.matchers.quran_matcher import FormulaMatch, QuranMatch
+
 # HadithMatch may come from either the API matcher or local DB matcher
 try:
     from islamic_stt.matchers.hadith_matcher import HadithMatch
@@ -53,9 +53,11 @@ logger = logging.getLogger(__name__)
 # Fix 8: orjson with stdlib fallback
 try:
     import orjson as _json_lib
+
     _ORJSON = True
 except ImportError:
     import json as _json_lib  # type: ignore[no-redef]
+
     _ORJSON = False
 
 
@@ -65,6 +67,7 @@ __all__ = ["OutputHandler", "EnrichedSegment"]
 # ---------------------------------------------------------------------------
 # Data model for a fully enriched segment (Fix 7 — slots=True)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class EnrichedSegment:
@@ -90,8 +93,13 @@ class EnrichedSegment:
     is_flagged: bool = False
     pending_hadith: bool = False
     # P1 review 3: provenance tracking
-    raw_text: str = ""          # original ASR output before post-processing
+    raw_text: str = ""  # original ASR output before post-processing
     was_corrected: bool = False  # True if post-processing changed the text
+    # Hadith verification metadata (Stage 1: suggestion only)
+    hadith_retrieval_confidence: float = 0.0  # calibrated retrieval score
+    hadith_correction_type: str = ""  # "suggestion" | "none" | "rejected"
+    hadith_correction_detail: str = ""  # human-readable suggestion/reason
+    hadith_suggestion_safe: bool = False  # whether all safety gates passed
 
     @property
     def timestamp(self) -> str:
@@ -101,6 +109,7 @@ class EnrichedSegment:
 # ---------------------------------------------------------------------------
 # OutputHandler
 # ---------------------------------------------------------------------------
+
 
 class OutputHandler:
     """
@@ -128,9 +137,7 @@ class OutputHandler:
         for es in enriched_segments:
             lang_counts[es.detected_lang] = lang_counts.get(es.detected_lang, 0) + 1
 
-        duration_s = (
-            enriched_segments[-1].segment.end if enriched_segments else 0.0
-        )
+        duration_s = enriched_segments[-1].segment.end if enriched_segments else 0.0
         duration_str = Transcriber.format_timestamp(duration_s)
 
         lines: list[str] = []
@@ -161,9 +168,6 @@ class OutputHandler:
                 m = es.quran_match
                 pct = int(m.confidence * 100)
                 exact_flag = " ✓exact" if m.is_exact else ""
-                ambig_flag = ""
-                if getattr(m, 'is_ambiguous', False):
-                    ambig_flag = f" ⚠ {m.ambiguous_count} ayahs share this text"
                 corrected_flag = ""
                 if es.was_corrected:
                     corrected_flag = " [corrected]"
@@ -172,17 +176,26 @@ class OutputHandler:
                 if m.matched_text and m.matched_text != text:
                     span_preview = m.matched_text[:60] + ("…" if len(m.matched_text) > 60 else "")
                     span_flag = f' [span: "{span_preview}"]'
-                annotation = (
-                    f"           ↳ 📖 Quran {m.surah_id}:{m.ayah_id} — "
-                    f"{m.surah_name}{exact_flag} ({pct}%){ambig_flag}{corrected_flag}{span_flag}"
-                )
-                # Show alternate refs for ambiguous matches
-                alt_refs = getattr(m, 'alternate_refs', None)
-                if alt_refs and len(alt_refs) > 1:
-                    alt_strs = [f"{r['surah_id']}:{r['ayah_id']}" for r in alt_refs[:5]]
-                    if len(alt_refs) > 5:
-                        alt_strs.append(f"…+{len(alt_refs) - 5} more")
-                    annotation += f"\n           ↳    also: {', '.join(alt_strs)}"
+
+                alt_refs = getattr(m, "alternate_refs", None)
+
+                if getattr(m, "is_ambiguous", False) and alt_refs:
+                    # P0 review 5: Do NOT render a single authoritative citation.
+                    # Show all candidates equally so no single ref is misread.
+                    alt_strs = [f"{r['surah_id']}:{r['ayah_id']}" for r in alt_refs[:8]]
+                    if len(alt_refs) > 8:
+                        alt_strs.append(f"…+{len(alt_refs) - 8} more")
+                    annotation = (
+                        f"           ↳ 📖 Quran [ambiguous — {m.ambiguous_count} ayahs] "
+                        f"({pct}%) possible: {', '.join(alt_strs)}"
+                        f"{corrected_flag}{span_flag}"
+                    )
+                else:
+                    annotation = (
+                        f"           ↳ 📖 Quran {m.surah_id}:{m.ayah_id} — "
+                        f"{m.surah_name}{exact_flag} ({pct}%)"
+                        f"{corrected_flag}{span_flag}"
+                    )
 
             elif es.hadith_match:
                 m = es.hadith_match
@@ -231,6 +244,16 @@ class OutputHandler:
             quran_data = None
             if es.quran_match:
                 quran_data = asdict(es.quran_match)
+            # Hadith verification metadata (Stage 1: suggestion only)
+            hadith_verification_data = None
+            if es.hadith_correction_type:
+                hadith_verification_data = {
+                    "retrieval_confidence": es.hadith_retrieval_confidence,
+                    "correction_type": es.hadith_correction_type,
+                    "correction_detail": es.hadith_correction_detail,
+                    "suggestion_safe": es.hadith_suggestion_safe,
+                    "applied": False,  # Stage 1: never applied
+                }
             payload.append(
                 {
                     "start": es.segment.start,
@@ -244,13 +267,15 @@ class OutputHandler:
                     "is_flagged": es.is_flagged,
                     "quran_match": quran_data,
                     "hadith_match": hadith_data,
+                    "hadith_verification": hadith_verification_data,
                     "formula_match": asdict(es.formula_match) if es.formula_match else None,
                 }
             )
-        with open(json_path, "wb" if _ORJSON else "w", encoding=None if _ORJSON else "utf-8") as fh:
-            if _ORJSON:
+        if _ORJSON:
+            with open(json_path, "wb") as fh:
                 fh.write(_json_lib.dumps(payload, option=_json_lib.OPT_INDENT_2))
-            else:
+        else:
+            with open(json_path, "w", encoding="utf-8") as fh:
                 _json_lib.dump(payload, fh, ensure_ascii=False, indent=2)  # type: ignore[attr-defined]
         logger.info("JSON transcript written → %s", json_path)
 
@@ -259,7 +284,9 @@ class OutputHandler:
         lines: list[str] = []
         for idx, es in enumerate(enriched_segments, start=1):
             lines.append(str(idx))
-            start = Transcriber.format_timestamp(es.segment.start, milliseconds=True).replace(".", ",")
+            start = Transcriber.format_timestamp(es.segment.start, milliseconds=True).replace(
+                ".", ","
+            )
             end = Transcriber.format_timestamp(es.segment.end, milliseconds=True).replace(".", ",")
             lines.append(f"{start} --> {end}")
             lang = es.detected_lang.upper()

@@ -103,11 +103,64 @@ _ENGLISH_NORMALIZATIONS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b[Aa]llahu\s*[Aa]kbar\b"), "Allahu Akbar"),
     (re.compile(r"\b[Aa]staghfirullah\b"), "Astaghfirullah"),
     (re.compile(r"\b[Jj]azak\s*[Aa]llah\b"), "JazakAllah"),
-    (re.compile(r"\bPBUH\b", re.IGNORECASE), "ﷺ"),
-    (re.compile(r"\bSAW\b"), "ﷺ"),  # case-sensitive to avoid matching "saw"
+    (re.compile(r"\bPBUH\b", re.IGNORECASE), "صلى الله عليه وسلم"),
+    (re.compile(r"\bSAW\b"), "صلى الله عليه وسلم"),  # case-sensitive to avoid matching "saw"
     (re.compile(r"\bSWT\b"), "سبحانه وتعالى"),
     (re.compile(r"\bRA\b"), "رضي الله عنه"),  # case-sensitive
 ]
+
+
+# ---------------------------------------------------------------------------
+# Mixed-script sanitizer (Colab fix: Latin leakage in Arabic/Urdu text)
+# ---------------------------------------------------------------------------
+# Whisper's multilingual decoder sometimes emits mixed-script tokens
+# (Arabic chars + Latin chars in a single word).  Examples:
+#   اللah → الله    فرma → فرما    مسلمán → مسلمان
+#
+# Strategy: targeted repair dictionary FIRST (safe, deterministic),
+# then guarded generic regex for remaining cases (only when Arabic
+# ratio is high and Latin suffix is very short).
+
+# Invocation stabilization: common corrupted forms → canonical
+_INVOCATION_REPAIRS: dict[re.Pattern, str] = {
+    # يا الله corruptions (very common in dua sections)
+    re.compile(r"الل[A-Za-z]{1,4}(?:\b|$)"): "الله",
+    # Common Urdu verb corruptions
+    re.compile(r"فر[Mm][Aa]?\b"): "فرما",
+    # Bismillah corruptions
+    re.compile(r"بسم\s*الل[A-Za-z]{1,4}"): "بسم الله",
+}
+
+# Generic mixed-script: Arabic word ending with short Latin suffix
+# Only applied when the token is predominantly Arabic (>70% Arabic chars)
+# Matches basic + accented Latin: A-Za-z plus Latin Extended (àáâãäåéèêëíîïóôõöúùûüñçß etc.)
+_LATIN_CHAR_CLASS = r"A-Za-z\u00C0-\u024F"
+_MIXED_SCRIPT_TRAILING_LATIN = re.compile(
+    r"([\u0600-\u06FF]{3,})[" + _LATIN_CHAR_CLASS + r"]{1,3}(?=\s|$)"
+)
+_MIXED_SCRIPT_LEADING_LATIN = re.compile(
+    r"(?:^|\s)[" + _LATIN_CHAR_CLASS + r"]{1,3}([\u0600-\u06FF]{3,})"
+)
+
+
+def _sanitize_mixed_script(text: str) -> str:
+    """
+    Remove Latin character leakage from Arabic/Urdu tokens.
+
+    Two-phase approach:
+    1. Targeted repair dictionary (high-confidence, known patterns)
+    2. Guarded generic regex (only for predominantly Arabic tokens)
+    """
+    # Phase 1: targeted repairs (safe, deterministic)
+    for pattern, replacement in _INVOCATION_REPAIRS.items():
+        text = pattern.sub(replacement, text)
+
+    # Phase 2: generic trailing Latin removal (guarded)
+    # Only strip if the Arabic portion is substantial (≥3 chars)
+    text = _MIXED_SCRIPT_TRAILING_LATIN.sub(r"\1", text)
+    text = _MIXED_SCRIPT_LEADING_LATIN.sub(r" \1", text)
+
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +178,7 @@ _MULTI_SPACE_RE = re.compile(r"  +")
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def apply_post_processing(text: str) -> str:
     """
     Apply all post-processing corrections to a transcribed text segment.
@@ -138,7 +192,7 @@ def apply_post_processing(text: str) -> str:
     Returns
     -------
     Corrected text with expanded abbreviations, fixed terminology,
-    and structural cleanup applied.
+    mixed-script repair, and structural cleanup applied.
     """
     if not text or not text.strip():
         return text
@@ -157,7 +211,10 @@ def apply_post_processing(text: str) -> str:
     for pattern, replacement in _ENGLISH_NORMALIZATIONS:
         text = pattern.sub(replacement, text)
 
-    # 4. Structural cleanup
+    # 4. Mixed-script sanitization (Latin leakage repair)
+    text = _sanitize_mixed_script(text)
+
+    # 5. Structural cleanup
     text = _MULTI_SPACE_RE.sub(" ", text)
     text = text.strip()
 

@@ -27,13 +27,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
 
 from rapidfuzz import fuzz
 
-from islamic_stt.core.arabic_utils import normalise_arabic
+from islamic_stt.core.arabic_utils import canonicalise_for_matching
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +49,9 @@ _MIN_QUERY_CHARS = 15
 _FTS_LIMIT = 20
 
 # Two-stage fuzzy thresholds
-_PARTIAL_RATIO_THRESHOLD = 70    # fast filter
+_PARTIAL_RATIO_THRESHOLD = 70  # fast filter
 _TOKEN_SET_RATIO_THRESHOLD = 82  # precision scorer
+_COMBINED_ACCEPT_THRESHOLD = 80  # final weighted scorer
 
 # Length ratio: reject if query is less than this fraction of corpus text
 _MIN_LENGTH_RATIO = 0.10
@@ -63,31 +62,53 @@ _PARAPHRASE_LENGTH_DIFF = 0.30  # 30% length difference triggers paraphrase flag
 
 _DEFAULT_DB_PATH = os.path.join("data", "hadith.db")
 
+_GENERIC_HADITH_WORDS = frozenset(
+    {
+        "قال",
+        "رسول",
+        "الله",
+        "صلي",
+        "عليه",
+        "وسلم",
+        "النبي",
+        "عن",
+        "حدثنا",
+        "اخبرنا",
+        "سمعت",
+        "يقول",
+        "رضي",
+        "تعالي",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass(slots=True)
 class HadithMatch:
     """Result of a Hadith match."""
-    collection: str           # e.g. "bukhari", "muslim"
-    hadith_number: str        # as stored in the DB
-    arabic_text: str          # original Arabic body
-    english_text: str         # English translation
-    matched_text: str         # what the transcription contained
-    confidence: float         # 0.0 – 1.0 (calibrated)
-    is_paraphrase: bool       # True if likely a paraphrase, not exact quote
-    chapter: str = ""         # chapter name/number
+
+    collection: str  # e.g. "bukhari", "muslim"
+    hadith_number: str  # as stored in the DB
+    arabic_text: str  # original Arabic body
+    english_text: str  # English translation
+    matched_text: str  # what the transcription contained
+    confidence: float  # 0.0 – 1.0 (calibrated)
+    is_paraphrase: bool  # True if likely a paraphrase, not exact quote
+    chapter: str = ""  # chapter name/number
 
 
 # ---------------------------------------------------------------------------
 # Trigram helpers for candidate re-ranking
 # ---------------------------------------------------------------------------
 
+
 def _trigrams(text: str) -> list[str]:
     """Return character 3-grams."""
-    return [text[i:i + 3] for i in range(len(text) - 2)]
+    return [text[i : i + 3] for i in range(len(text) - 2)]
 
 
 def _trigram_overlap(query: str, candidate: str) -> float:
@@ -104,6 +125,7 @@ def _trigram_overlap(query: str, candidate: str) -> float:
 # ---------------------------------------------------------------------------
 # Confidence calibration (HADITH-3)
 # ---------------------------------------------------------------------------
+
 
 def _calibrate_confidence(
     fuzzy_score: float,
@@ -133,9 +155,19 @@ def _calibrate_confidence(
     return round(min(1.0, max(0.0, adjusted)), 4)
 
 
+def _distinctive_token_count(query_normalized: str) -> int:
+    """Count non-boilerplate tokens so generic isnad/opening phrases do not match."""
+    return sum(
+        1
+        for token in query_normalized.split()
+        if len(token) >= 3 and token not in _GENERIC_HADITH_WORDS
+    )
+
+
 # ---------------------------------------------------------------------------
 # Paraphrase detection (HADITH-5)
 # ---------------------------------------------------------------------------
+
 
 def _is_paraphrase(
     confidence: float,
@@ -161,15 +193,13 @@ def _is_paraphrase(
 
     # Word order difference: token_set ignores order, token_sort respects it
     order_delta = token_set_score - token_sort_score
-    if order_delta > 15:  # >15 point difference suggests reordered words
-        return True
-
-    return False
+    return order_delta > 15  # >15 point difference suggests reordered words
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 class LocalHadithMatcher:
     """
@@ -183,8 +213,16 @@ class LocalHadithMatcher:
         print(result.collection, result.hadith_number, result.confidence)
     """
 
-    def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
+    def __init__(
+        self,
+        db_path: str = _DEFAULT_DB_PATH,
+        *,
+        token_set_threshold: int = _TOKEN_SET_RATIO_THRESHOLD,
+        combined_threshold: int = _COMBINED_ACCEPT_THRESHOLD,
+    ) -> None:
         self.db_path = db_path
+        self._token_set_threshold = token_set_threshold
+        self._combined_threshold = combined_threshold
 
         if not os.path.isfile(db_path):
             raise FileNotFoundError(
@@ -223,8 +261,10 @@ class LocalHadithMatcher:
         if not text or not text.strip():
             return None
 
-        query_normalized = normalise_arabic(text)
+        query_normalized = canonicalise_for_matching(text)
         if len(query_normalized) < _MIN_QUERY_CHARS:
+            return None
+        if _distinctive_token_count(query_normalized) < 3:
             return None
 
         # Stage 1: FTS5 full-text search for broad candidates
@@ -243,8 +283,7 @@ class LocalHadithMatcher:
         # This was documented but never actually used.
         if len(candidates) > 5:
             scored = [
-                (c, _trigram_overlap(query_normalized, c["text_ar_normalized"]))
-                for c in candidates
+                (c, _trigram_overlap(query_normalized, c["text_ar_normalized"])) for c in candidates
             ]
             scored.sort(key=lambda x: x[1], reverse=True)
             candidates = [c for c, _ in scored[:10]]  # top 10 by trigram
@@ -335,15 +374,24 @@ class LocalHadithMatcher:
 
             # Stage 2: precision with token_set_ratio
             token_set_score = fuzz.token_set_ratio(query_normalized, corpus_normalized)
-            if token_set_score < _TOKEN_SET_RATIO_THRESHOLD:
+            if token_set_score < self._token_set_threshold:
                 continue
 
             # Also compute token_sort for paraphrase detection
             token_sort_score = fuzz.token_sort_ratio(query_normalized, corpus_normalized)
+            lev_score = fuzz.ratio(query_normalized, corpus_normalized)
+            combined_score = (
+                0.35 * partial_score
+                + 0.35 * token_set_score
+                + 0.20 * token_sort_score
+                + 0.10 * lev_score
+            )
+            if combined_score < self._combined_threshold:
+                continue
 
             # Confidence calibration (HADITH-3)
             calibrated = _calibrate_confidence(
-                max(partial_score, token_set_score),
+                combined_score,
                 query_len,
                 corpus_len,
             )

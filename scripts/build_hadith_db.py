@@ -25,9 +25,7 @@ The output database is written to data/hadith.db (~15-25 MB).
 from __future__ import annotations
 
 import csv
-import hashlib
 import logging
-import os
 import sqlite3
 import sys
 import time
@@ -48,7 +46,7 @@ logger = logging.getLogger(__name__)
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
 _DATA_DIR = _PROJECT_DIR / "data"
-_CSV_PATH = _PROJECT_DIR / "all_hadiths_clean.csv"
+_CSV_PATH = _DATA_DIR / "all_hadiths_clean.csv"
 _DB_PATH = _DATA_DIR / "hadith.db"
 
 # ---------------------------------------------------------------------------
@@ -122,6 +120,7 @@ def _normalize_collection(raw: str) -> str:
 # Build
 # ---------------------------------------------------------------------------
 
+
 def build_database(csv_path: str | Path = _CSV_PATH, db_path: str | Path = _DB_PATH) -> None:
     """
     Read the CSV and build the SQLite + FTS5 database.
@@ -158,7 +157,7 @@ def build_database(csv_path: str | Path = _CSV_PATH, db_path: str | Path = _DB_P
     skipped = 0
     errors = 0
 
-    with open(csv_path, "r", encoding="utf-8") as fh:
+    with open(csv_path, encoding="utf-8") as fh:
         reader = csv.reader(fh)
         header = next(reader)
         logger.info("CSV columns: %s", header)
@@ -172,8 +171,17 @@ def build_database(csv_path: str | Path = _CSV_PATH, db_path: str | Path = _DB_P
                     skipped += 1
                     continue
 
-                (csv_id, hadith_id, source, chapter_no, hadith_no,
-                 chapter, chain_indx, text_ar, text_en) = row[:9]
+                (
+                    csv_id,
+                    hadith_id,
+                    source,
+                    chapter_no,
+                    hadith_no,
+                    chapter,
+                    chain_indx,
+                    text_ar,
+                    text_en,
+                ) = row[:9]
 
                 text_ar = text_ar.strip()
                 if not text_ar or len(text_ar) < 10:
@@ -183,17 +191,19 @@ def build_database(csv_path: str | Path = _CSV_PATH, db_path: str | Path = _DB_P
                 collection = _normalize_collection(source)
                 text_ar_normalized = normalise_arabic(text_ar)
 
-                batch.append((
-                    int(hadith_id) if hadith_id.strip() else 0,
-                    collection,
-                    chapter_no.strip(),
-                    hadith_no.strip(),
-                    chapter.strip(),
-                    chain_indx.strip(),
-                    text_ar,
-                    text_ar_normalized,
-                    text_en.strip(),
-                ))
+                batch.append(
+                    (
+                        int(hadith_id) if hadith_id.strip() else 0,
+                        collection,
+                        chapter_no.strip(),
+                        hadith_no.strip(),
+                        chapter.strip(),
+                        chain_indx.strip(),
+                        text_ar,
+                        text_ar_normalized,
+                        text_en.strip(),
+                    )
+                )
 
                 # Batch insert every 1000 rows
                 if len(batch) >= 1000:

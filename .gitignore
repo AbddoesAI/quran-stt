@@ -56,6 +56,12 @@ transcript*.json
 transcript*.srt
 flagged*.txt
 
+# Data and Evaluation
+eval_results/
+data/hadith.db
+data/all_hadiths_clean.csv
+
+
 # Model cache
 .cache/
 models/

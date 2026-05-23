@@ -10,10 +10,13 @@ rapidfuzz==3.9.7
 
 # HTTP requests (Sunnah.com API)
 requests==2.32.3
+httpx==0.27.0
 
 # Utility
 tqdm==4.66.4
 colorama==0.4.6                   # coloured console output
+diskcache==5.6.3                  # thread-safe Hadith API cache
+orjson==3.10.7                    # fast JSON transcript output
 
 # GPU (install separately if not already present in CUDA env)
 # torch>=2.2.0+cu121              # already present on Colab T4 / local CUDA env

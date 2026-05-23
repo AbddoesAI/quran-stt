@@ -1,3 +1,0 @@
-﻿COLUMNS: ['id', 'hadith_id', 'source', 'chapter_no', 'hadith_no', 'chapter', 'chain_indx', 'text_ar', 'text_en']
-TOTAL ROWS: 34441
-SOURCES: {"Jami' al-Tirmidhi", 'Sahih Muslim', 'Sunan Ibn Majah', "Sunan Abi Da'ud", 'Sahih Bukhari', "Sunan an-Nasa'i"}
