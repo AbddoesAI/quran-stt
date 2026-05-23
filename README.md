@@ -173,23 +173,74 @@ config = PipelineConfig(
 )
 
 stats = run_pipeline(config, audio_path="lecture.mp3")
-print(f"Transcribed {stats['total_segments']} segments.")
+print(f"Transcribed {stats['total_segments']} segments in {stats['elapsed_seconds']}s")
+```
+
+### Google Colab
+
+```python
+# Cell 1: Install
+!pip install faster-whisper langdetect lingua-language-detector rapidfuzz tqdm colorama
+!git clone https://github.com/AbddoesAI/quran-stt.git
+%cd quran-stt
+!pip install -e .
+!python scripts/setup_corpus.py
+
+# Cell 2: Transcribe
+!quran-stt /content/lecture.mp3 --output /content/transcript.txt
 ```
 
 ---
 
-## 🧪 Evaluation
+## 📁 Project Structure
 
-This repository contains an evaluation harness to measure Word Error Rate (WER), Arabic drift, and hallucination rates.
-
-```bash
-# Run the evaluation harness (requires eval_dataset/ to be populated)
-python scripts/eval_run.py --dataset eval_dataset --output eval_results
+```
+quran-stt/
+├── src/islamic_stt/           # Main Python package
+│   ├── __init__.py            # Package exports
+│   ├── __main__.py            # python -m islamic_stt
+│   ├── cli.py                 # Command-line interface
+│   ├── config.py              # PipelineConfig dataclass
+│   ├── pipeline.py            # Main orchestrator
+│   ├── logging_utils.py       # Logging configuration
+│   ├── core/                  # Transcription & NLP
+│   │   ├── arabic_utils.py    # Arabic text normalization
+│   │   ├── transcriber.py     # Whisper inference wrapper
+│   │   ├── segment_merger.py  # Fragment → paragraph merging
+│   │   └── language_detector.py
+│   ├── matchers/              # Source matching engines
+│   │   ├── base.py            # Matcher protocol
+│   │   ├── quran_matcher.py   # Local Quran corpus matching
+│   │   └── hadith_matcher.py  # Sunnah.com API matching
+│   └── output/                # Output serialization
+│       ├── output_handler.py  # TXT/JSON/SRT generation
+│       └── flagged_handler.py # Unverified segment collection
+├── tests/                     # Test suite
+├── scripts/                   # Utility scripts
+│   └── setup_corpus.py        # Quran corpus downloader
+├── data/                      # Corpus data (gitignored)
+├── pyproject.toml             # Project metadata & tool config
+├── requirements.txt           # pip dependencies
+└── .env.example               # Environment variable template
 ```
 
-To run the unit test suite:
-```bash
-pytest tests/ -v
+---
+
+## 📊 Output Example
+
+```
+════════════════════════════════════════════════════════════════════════════
+ ISLAMIC LECTURE TRANSCRIPT
+ Duration: 01:23:45  |  Segments: 342
+ Languages: AR: 45  EN: 12  UR: 285
+════════════════════════════════════════════════════════════════════════════
+
+[00:00:03] [UR] بسم اللہ الرحمن الرحیم، آج ہم بات کریں گے
+[00:00:15] [AR] بسم الله الرحمن الرحيم
+           ↳ 📖 Quran 1:1 — Al-Fatihah ✓exact (100%)
+[00:00:22] [AR] إنما الأعمال بالنيات
+           ↳ 📜 Hadith — Bukhari #1 (89%)
+[00:01:05] [EN] So the Prophet, peace be upon him, said...
 ```
 
 ---
