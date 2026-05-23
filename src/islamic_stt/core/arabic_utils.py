@@ -144,8 +144,12 @@ def normalise_arabic_cached(text: str) -> str:
 # Known Whisper hallucination phrases from YouTube-trained models.
 # Used by both transcriber.py and quran_matcher.py — defined here to
 # avoid duplication drift.
+#
+# Expanded from 7 → 35+ phrases based on observed Whisper large-v3
+# hallucination patterns in Arabic/Urdu/English audio.
 
 HALLUCINATION_PHRASES_RAW: frozenset[str] = frozenset({
+    # --- Arabic YouTube-trained hallucinations ---
     "اشتركوا في القناة",
     "شكرا للمشاهدة",
     "لا تنسوا الاشتراك",
@@ -153,8 +157,60 @@ HALLUCINATION_PHRASES_RAW: frozenset[str] = frozenset({
     "شكراً للمشاهدة",
     "لا تنسى الاشتراك والإعجاب",
     "تابعونا على",
+    "اشتراك في القناة",
+    "لا تنسى الاشتراك في القناة",
+    "اشترك وفعل زر الجرس",
+    "اذا اعجبك الفيديو",
+    "لا تنسى الاشتراك",
+    "شكرا لكم على المشاهدة",
+    "مشاهدة ممتعة",
+    "نراكم في الحلقة القادمة",
+    "السلام عليكم ورحمة الله",  # only when isolated (not in context)
+    # --- English YouTube hallucinations ---
+    "Thanks for watching",
+    "Please subscribe",
+    "Don't forget to subscribe",
+    "Like and subscribe",
+    "Hit the bell icon",
+    "See you in the next video",
+    "Thank you for watching",
+    "Please like and subscribe",
+    # --- Urdu YouTube hallucinations ---
+    "چینل کو سبسکرائب کریں",
+    "لائک اور سبسکرائب کریں",
+    "ویڈیو کو لائک کریں",
+    # --- Whisper silence/noise hallucinations ---
+    "...",
+    "♪",
+    "♪♪",
+    "♪♪♪",
+    "[موسيقى]",
+    "[تصفيق]",
+    "[音楽]",
+    "MBC",
+    "Amara.org",
+    "www.mooji.org",
+    "Sous-titres réalisés par la communauté",
+    "ترجمة",
+    "Subtítulos",
 })
 
 HALLUCINATION_PHRASES_NORMALISED: frozenset[str] = frozenset(
     normalise_arabic(p) for p in HALLUCINATION_PHRASES_RAW
 )
+
+# Patterns that indicate hallucination by structure (not exact match)
+HALLUCINATION_PATTERNS: list[re.Pattern] = [
+    # Repeated single word 8+ times (raised from 4 to protect dhikr).
+    # Exclude known dhikr words from this check.
+    re.compile(
+        r"^(?!.*(الله|سبحان|الحمد|استغفر|اكبر))"  # negative lookahead: skip dhikr
+        r"(\S+)(\s+\2){7,}$"
+    ),
+    # Very short segment that is just punctuation or whitespace
+    re.compile(r"^\s*[\.…,،]+\s*$"),
+    # Music/sound markers
+    re.compile(r"^\s*[♪♫🎵🎶]+\s*$"),
+    # URL-like content
+    re.compile(r"https?://|www\.|\.com|\.org"),
+]

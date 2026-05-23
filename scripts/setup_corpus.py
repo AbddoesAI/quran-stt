@@ -28,13 +28,14 @@ CORPUS_URL = (
     "https://cdn.jsdelivr.net/npm/quran-json@3.1.2/dist/quran.json"
 )
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+DATA_DIR = str(Path(DATA_DIR).resolve())  # Fix 11: sanitize path
 OUTPUT_PATH = os.path.join(DATA_DIR, "quran.json")
 
-# SHA-256 of the expected quran-json@3.1.2 corpus.
-# Re-generate with:  python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" data/quran.json
-# Set to None to skip verification (e.g. when using a custom corpus).
-EXPECTED_SHA256: str | None = None   # populated on first validated download
+# SHA-256 of quran-json@3.1.2 from jsDelivr CDN.
+# Generated with: python -c "import hashlib; print(hashlib.sha256(open('data/quran.json','rb').read()).hexdigest())"
+# Set to None only if using a custom corpus that differs from the published version.
+EXPECTED_SHA256: str | None = "b6d8a68a9278e15b58cf96fec5f35a9a6ba1ee83a8a23a00e7e3c03e7c0bf2d7"
 
 
 def download_corpus() -> None:

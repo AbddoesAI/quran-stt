@@ -33,7 +33,7 @@ import logging
 from dataclasses import replace
 from typing import List
 
-from islamic_stt.core.transcriber import TranscriptSegment
+from islamic_stt.core.types import TranscriptSegment
 
 __all__ = ["merge_short_segments"]
 

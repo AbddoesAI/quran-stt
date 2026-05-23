@@ -49,10 +49,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--primary-language", default=env_defaults.primary_language,
                    choices=["ur", "ar", "en", "auto"],
                    help="Primary language of the lecture")
-    p.add_argument("--beam-size", type=int, default=5,
-                   help="Beam search width")
+    p.add_argument("--beam-size", type=int, default=8,
+                   help="Beam search width (8 recommended for T4)")
+    p.add_argument("--best-of", type=int, default=5,
+                   help="Number of candidate decodings to sample")
+    p.add_argument("--patience", type=float, default=1.5,
+                   help="Beam search patience factor")
     p.add_argument("--hadith-workers", type=int, default=4,
                    help="Parallel workers for Hadith API calls")
+    p.add_argument("--hadith-db", default=os.path.join("data", "hadith.db"),
+                   help="Path to local Hadith SQLite database")
     # --- New flags ---
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable debug-level logging")
@@ -81,11 +87,14 @@ def main() -> None:
         output_path=args.output,
         flagged_path=args.flagged,
         quran_corpus=args.quran_corpus,
+        hadith_db_path=args.hadith_db,
         no_hadith=args.no_hadith,
         sunnah_api_key=os.environ.get("SUNNAH_API_KEY"),  # env-only, never CLI
         no_speech_threshold=args.no_speech_threshold,
         primary_language=args.primary_language,
         beam_size=args.beam_size,
+        best_of=args.best_of,
+        patience=args.patience,
         hadith_workers=args.hadith_workers,
         verbose=args.verbose,
         max_file_size_mb=args.max_file_size,

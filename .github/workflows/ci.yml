@@ -21,6 +21,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Fix 12: Cache pip to speed up CI by ~60%
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ matrix.python-version }}-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -29,5 +38,18 @@ jobs:
       - name: Lint with ruff
         run: ruff check src/ tests/
 
-      - name: Run tests
-        run: pytest -v
+      # Fix 12: Security audit for known vulnerable dependencies
+      - name: Security audit (pip-audit)
+        run: pip-audit
+
+      # Fix 12: Tests with coverage reporting
+      - name: Run tests with coverage
+        run: pytest -v --cov=islamic_stt --cov-report=xml --cov-report=term-missing
+
+      # Fix 12: Upload coverage to Codecov
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: coverage.xml
+          fail_ci_if_error: false

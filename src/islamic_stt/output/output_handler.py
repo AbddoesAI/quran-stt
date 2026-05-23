@@ -23,31 +23,50 @@ If no match was found the segment is still included in the transcript but
 carries a ⚠ marker so the reviewer knows it was sent to flagged.txt.
 
     [HH:MM:SS] <unverified Arabic text>  ⚠ [see flagged.txt]
+
+Changes (audit fixes)
+---------------------
+- Fix 7  : `@dataclass(slots=True)` on EnrichedSegment for faster attribute access.
+- Fix 8  : `orjson` used for JSON serialization (3–10x faster than stdlib json);
+           graceful fallback to stdlib json if not installed.
+- Fix 10 : Modernised type annotations (list[X], X | None).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-from dataclasses import asdict, dataclass
-from typing import List, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Iterable
 
-from islamic_stt.core.transcriber import TranscriptSegment, Transcriber
+from islamic_stt.core.types import TranscriptSegment
+from islamic_stt.core.transcriber import Transcriber
 from islamic_stt.matchers.quran_matcher import FormulaMatch, QuranMatch
-from islamic_stt.matchers.hadith_matcher import HadithMatch
+# HadithMatch may come from either the API matcher or local DB matcher
+try:
+    from islamic_stt.matchers.hadith_matcher import HadithMatch
+except ImportError:
+    HadithMatch = None  # type: ignore[misc,assignment]
 
 logger = logging.getLogger(__name__)
+
+# Fix 8: orjson with stdlib fallback
+try:
+    import orjson as _json_lib
+    _ORJSON = True
+except ImportError:
+    import json as _json_lib  # type: ignore[no-redef]
+    _ORJSON = False
 
 
 __all__ = ["OutputHandler", "EnrichedSegment"]
 
 
 # ---------------------------------------------------------------------------
-# Data model for a fully enriched segment
+# Data model for a fully enriched segment (Fix 7 — slots=True)
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class EnrichedSegment:
     """
     Carries everything needed to render one output line.
@@ -65,11 +84,14 @@ class EnrichedSegment:
 
     segment: TranscriptSegment
     detected_lang: str
-    quran_match: Optional[QuranMatch] = None
-    hadith_match: Optional[HadithMatch] = None
-    formula_match: Optional[FormulaMatch] = None
+    quran_match: QuranMatch | None = None
+    hadith_match: HadithMatch | None = None
+    formula_match: FormulaMatch | None = None
     is_flagged: bool = False
     pending_hadith: bool = False
+    # P1 review 3: provenance tracking
+    raw_text: str = ""          # original ASR output before post-processing
+    was_corrected: bool = False  # True if post-processing changed the text
 
     @property
     def timestamp(self) -> str:
@@ -92,7 +114,7 @@ class OutputHandler:
     def __init__(self, output_path: str) -> None:
         self.output_path = output_path
 
-    def write(self, enriched_segments: List[EnrichedSegment]) -> None:
+    def write(self, enriched_segments: list[EnrichedSegment]) -> None:
         """
         Serialise all enriched segments into a plain-text transcript.
 
@@ -139,18 +161,39 @@ class OutputHandler:
                 m = es.quran_match
                 pct = int(m.confidence * 100)
                 exact_flag = " ✓exact" if m.is_exact else ""
+                ambig_flag = ""
+                if getattr(m, 'is_ambiguous', False):
+                    ambig_flag = f" ⚠ {m.ambiguous_count} ayahs share this text"
+                corrected_flag = ""
+                if es.was_corrected:
+                    corrected_flag = " [corrected]"
+                # Show matched span if it differs from full segment text
+                span_flag = ""
+                if m.matched_text and m.matched_text != text:
+                    span_preview = m.matched_text[:60] + ("…" if len(m.matched_text) > 60 else "")
+                    span_flag = f' [span: "{span_preview}"]'
                 annotation = (
                     f"           ↳ 📖 Quran {m.surah_id}:{m.ayah_id} — "
-                    f"{m.surah_name}{exact_flag} ({pct}%)"
+                    f"{m.surah_name}{exact_flag} ({pct}%){ambig_flag}{corrected_flag}{span_flag}"
                 )
+                # Show alternate refs for ambiguous matches
+                alt_refs = getattr(m, 'alternate_refs', None)
+                if alt_refs and len(alt_refs) > 1:
+                    alt_strs = [f"{r['surah_id']}:{r['ayah_id']}" for r in alt_refs[:5]]
+                    if len(alt_refs) > 5:
+                        alt_strs.append(f"…+{len(alt_refs) - 5} more")
+                    annotation += f"\n           ↳    also: {', '.join(alt_strs)}"
 
             elif es.hadith_match:
                 m = es.hadith_match
                 pct = int(m.confidence * 100)
                 collection = m.collection.capitalize()
+                paraphrase_flag = ""
+                if hasattr(m, "is_paraphrase") and m.is_paraphrase:
+                    paraphrase_flag = " ⚠ paraphrase"
                 annotation = (
                     f"           ↳ 📜 Hadith — {collection} #{m.hadith_number} "
-                    f"({pct}%)"
+                    f"({pct}%){paraphrase_flag}"
                 )
 
             elif es.is_flagged:
@@ -174,29 +217,44 @@ class OutputHandler:
         self._write_json(enriched_segments)
         self._write_srt(enriched_segments)
 
-    def _write_json(self, enriched_segments: List[EnrichedSegment]) -> None:
+    def _write_json(self, enriched_segments: list[EnrichedSegment]) -> None:
+        """Write JSON transcript using orjson when available (Fix 8)."""
         json_path = os.path.splitext(self.output_path)[0] + ".json"
         payload = []
         for es in enriched_segments:
+            hadith_data = None
+            if es.hadith_match:
+                try:
+                    hadith_data = asdict(es.hadith_match)
+                except Exception:
+                    hadith_data = {"matched_text": str(es.hadith_match)}
+            quran_data = None
+            if es.quran_match:
+                quran_data = asdict(es.quran_match)
             payload.append(
                 {
                     "start": es.segment.start,
                     "end": es.segment.end,
                     "timestamp": es.timestamp,
                     "text": es.segment.text,
+                    "raw_text": es.raw_text if es.was_corrected else None,
+                    "was_corrected": es.was_corrected,
                     "detected_language": es.detected_lang,
                     "avg_word_confidence": es.segment.avg_word_confidence,
                     "is_flagged": es.is_flagged,
-                    "quran_match": asdict(es.quran_match) if es.quran_match else None,
-                    "hadith_match": asdict(es.hadith_match) if es.hadith_match else None,
+                    "quran_match": quran_data,
+                    "hadith_match": hadith_data,
                     "formula_match": asdict(es.formula_match) if es.formula_match else None,
                 }
             )
-        with open(json_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        with open(json_path, "wb" if _ORJSON else "w", encoding=None if _ORJSON else "utf-8") as fh:
+            if _ORJSON:
+                fh.write(_json_lib.dumps(payload, option=_json_lib.OPT_INDENT_2))
+            else:
+                _json_lib.dump(payload, fh, ensure_ascii=False, indent=2)  # type: ignore[attr-defined]
         logger.info("JSON transcript written → %s", json_path)
 
-    def _write_srt(self, enriched_segments: List[EnrichedSegment]) -> None:
+    def _write_srt(self, enriched_segments: list[EnrichedSegment]) -> None:
         srt_path = os.path.splitext(self.output_path)[0] + ".srt"
         lines: list[str] = []
         for idx, es in enumerate(enriched_segments, start=1):

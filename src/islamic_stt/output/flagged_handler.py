@@ -31,7 +31,8 @@ import os
 from dataclasses import dataclass
 from typing import List
 
-from islamic_stt.core.transcriber import TranscriptSegment, Transcriber
+from islamic_stt.core.types import TranscriptSegment
+from islamic_stt.core.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
 

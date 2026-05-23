@@ -23,14 +23,24 @@ Rate limiting
 -------------
 The free tier allows 100 requests / hour.  We add a small sleep between
 calls and honour 429 responses with exponential backoff.
+
+Changes (audit fixes)
+---------------------
+- Fix 1  : Replaced `shelve` with `diskcache.Cache` (thread-safe, TTL-bounded,
+           no corruption under ThreadPoolExecutor concurrent writes).
+- Fix 9  : Added `match_many_async()` coroutine using `httpx.AsyncClient` for
+           I/O-bound concurrent Hadith lookups.
+- Fix 10 : Modernised type annotations to Python 3.10+ style (X | None, list[X]).
+- Fix 11 : Cache path sanitized via pathlib.Path.resolve().
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import pathlib
 import time
-import shelve
 from dataclasses import dataclass
 from typing import Optional
 
@@ -65,7 +75,40 @@ _REQUEST_DELAY = 1.0
 # Retry settings for 429 / transient errors.
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0     # seconds; doubles on each retry
+
 _CACHE_PATH_ENV = "HADITH_CACHE_PATH"
+
+# diskcache settings (Fix 1)
+_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30   # 30-day TTL per entry
+_CACHE_SIZE_LIMIT = 256 * 1024 * 1024     # 256 MB max on-disk size
+
+
+# ---------------------------------------------------------------------------
+# Optional httpx import (Fix 9)
+# ---------------------------------------------------------------------------
+
+try:
+    import httpx as _httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:
+    _HTTPX_AVAILABLE = False
+    _httpx = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# diskcache import (Fix 1)
+# ---------------------------------------------------------------------------
+
+try:
+    import diskcache as _diskcache
+    _DISKCACHE_AVAILABLE = True
+except ImportError:
+    _DISKCACHE_AVAILABLE = False
+    _diskcache = None  # type: ignore[assignment]
+    logger.warning(
+        "diskcache not installed — falling back to in-memory dict cache. "
+        "Install with: pip install diskcache"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +146,7 @@ class HadithMatcher:
         print(result.collection, result.hadith_number, result.confidence)
     """
 
-    def __init__(self, api_key: Optional[str] = None) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or os.environ.get(SUNNAH_API_KEY_ENV)
         if not self.api_key:
             raise ValueError(
@@ -119,17 +162,39 @@ class HadithMatcher:
                 "Accept": "application/json",
             }
         )
+        # Tune connection pool to match caller's worker count (Fix OPT-5)
+        from requests.adapters import HTTPAdapter
+        _adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
+        self._session.mount("https://", _adapter)
+
         self._last_request_time: float = 0.0
-        self._cache_path = os.environ.get(_CACHE_PATH_ENV, os.path.join("cache", "hadith_cache.db"))
-        os.makedirs(os.path.dirname(self._cache_path) or ".", exist_ok=True)
+
+        # --- Cache path: sanitize and resolve (Fix 11) ----------------------
+        raw_path = os.environ.get(_CACHE_PATH_ENV, os.path.join("cache", "hadith_cache"))
+        self._cache_path = str(pathlib.Path(raw_path).resolve())
+        os.makedirs(os.path.dirname(self._cache_path), exist_ok=True)
+
+        # --- Open diskcache (Fix 1) -----------------------------------------
+        if _DISKCACHE_AVAILABLE:
+            self._cache: dict | _diskcache.Cache = _diskcache.Cache(  # type: ignore[type-arg]
+                self._cache_path,
+                size_limit=_CACHE_SIZE_LIMIT,
+            )
+            logger.debug("Hadith cache: diskcache at %s", self._cache_path)
+        else:
+            # Fallback: in-memory dict (no persistence, no TTL, no sharing)
+            self._cache = {}
+            logger.warning("Hadith cache: in-memory only (diskcache unavailable).")
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the underlying HTTP session."""
+        """Close the underlying HTTP session and cache."""
         self._session.close()
+        if _DISKCACHE_AVAILABLE and isinstance(self._cache, _diskcache.Cache):
+            self._cache.close()
 
     def __enter__(self) -> "HadithMatcher":
         return self
@@ -138,10 +203,10 @@ class HadithMatcher:
         self.close()
 
     # ------------------------------------------------------------------
-    # Public method
+    # Public sync method (unchanged API)
     # ------------------------------------------------------------------
 
-    def match(self, text: str) -> Optional[HadithMatch]:
+    def match(self, text: str) -> HadithMatch | None:
         """
         Search for *text* in the Sunnah.com hadith database.
 
@@ -151,22 +216,131 @@ class HadithMatcher:
             return None
 
         query_normalised = normalise_arabic(text)
-
         candidates = self._cached_search(query_normalised)
-        if not candidates:
+        return self._score_candidates(candidates, text, query_normalised)
+
+    # ------------------------------------------------------------------
+    # Public async batch method (Fix 9)
+    # ------------------------------------------------------------------
+
+    async def match_many_async(self, texts: list[str]) -> list[HadithMatch | None]:
+        """
+        Asynchronously search for multiple texts using httpx.AsyncClient.
+
+        Falls back to the synchronous path if httpx is not installed.
+
+        Parameters
+        ----------
+        texts : List of raw Arabic text strings to match.
+
+        Returns
+        -------
+        List of HadithMatch | None, one per input text, in order.
+        """
+        if not _HTTPX_AVAILABLE:
+            logger.warning("httpx not available — falling back to sync Hadith matching.")
+            return [self.match(t) for t in texts]
+
+        headers = {
+            "X-API-Key": self.api_key,
+            "Accept": "application/json",
+        }
+
+        async def _fetch_one(client: _httpx.AsyncClient, text: str) -> HadithMatch | None:
+            if not text or not text.strip():
+                return None
+            query = normalise_arabic(text)
+            if len(query) < 12:
+                return None
+
+            # Check cache first (diskcache is sync but fast enough here)
+            cached = self._cache_get(query)
+            if cached is not None:
+                return self._score_candidates(cached, text, query)
+
+            url = f"{SUNNAH_API_BASE}/hadiths/search"
+            params = {"q": query, "limit": _SEARCH_LIMIT}
+
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    r = await client.get(url, params=params, timeout=10.0)
+                    if r.status_code == 200:
+                        data = r.json().get("data", [])
+                        self._cache_set(query, data)
+                        return self._score_candidates(data, text, query)
+                    if r.status_code == 429:
+                        wait = _BACKOFF_BASE ** attempt
+                        logger.warning("Rate limited. Waiting %ds …", int(wait))
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error("API error %d", r.status_code)
+                    return None
+                except Exception as exc:
+                    wait = _BACKOFF_BASE ** attempt
+                    logger.warning("Network error (%s). Retry in %ds …", exc, int(wait))
+                    await asyncio.sleep(wait)
+
             return None
 
-        best_match: Optional[HadithMatch] = None
+        async with _httpx.AsyncClient(headers=headers) as client:
+            tasks = [_fetch_one(client, t) for t in texts]
+            return list(await asyncio.gather(*tasks))
+
+    # ------------------------------------------------------------------
+    # Cache helpers (Fix 1 — diskcache)
+    # ------------------------------------------------------------------
+
+    def _cache_get(self, key: str) -> list[dict] | None:
+        """Return cached result or None."""
+        try:
+            if _DISKCACHE_AVAILABLE and isinstance(self._cache, _diskcache.Cache):
+                return self._cache.get(key)
+            return self._cache.get(key)  # type: ignore[return-value]
+        except Exception as exc:
+            logger.warning("Cache read error: %s", exc)
+            return None
+
+    def _cache_set(self, key: str, value: list[dict]) -> None:
+        """Write to cache with TTL."""
+        try:
+            if _DISKCACHE_AVAILABLE and isinstance(self._cache, _diskcache.Cache):
+                self._cache.set(key, value, expire=_CACHE_TTL_SECONDS)
+            else:
+                self._cache[key] = value  # type: ignore[index]
+        except Exception as exc:
+            logger.warning("Cache write error: %s", exc)
+
+    def _cached_search(self, query: str) -> list[dict]:
+        """Synchronous cache-then-API lookup."""
+        if len(query) < 12:
+            return []
+        cached = self._cache_get(query)
+        if cached is not None:
+            return cached
+        result = self._search(query)
+        self._cache_set(query, result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Scoring (shared between sync and async paths)
+    # ------------------------------------------------------------------
+
+    def _score_candidates(
+        self,
+        candidates: list[dict],
+        raw_text: str,
+        query_normalised: str,
+    ) -> HadithMatch | None:
+        """Pick the best-scoring candidate above FUZZY_THRESHOLD."""
+        best_match: HadithMatch | None = None
         best_score = 0
 
         for hadith in candidates:
             arabic_body = hadith.get("arabic", {}).get("body", "")
             if not arabic_body:
                 continue
-
             corpus_normalised = normalise_arabic(arabic_body)
             score = fuzz.partial_ratio(query_normalised, corpus_normalised)
-
             if score > best_score:
                 best_score = score
                 english_body = hadith.get("english", {}).get("body", "")
@@ -175,40 +349,20 @@ class HadithMatcher:
                     hadith_number=str(hadith.get("hadithNumber", "?")),
                     arabic_text=arabic_body,
                     english_text=english_body,
-                    matched_text=text,
+                    matched_text=raw_text,
                     confidence=score / 100.0,
                 )
 
         if best_match and best_score >= FUZZY_THRESHOLD:
             return best_match
-
         return None
 
-    def _cached_search(self, query: str) -> list[dict]:
-        if len(query) < 12:
-            return []
-        try:
-            with shelve.open(self._cache_path) as db:
-                cached = db.get(query)
-                if cached is not None:
-                    return cached
-                result = self._search(query)
-                db[query] = result
-                return result
-        except Exception as exc:
-            logger.warning("Cache error (%s), falling back to API.", exc)
-            return self._search(query)
-
     # ------------------------------------------------------------------
-    # Private helpers
+    # Private HTTP helpers
     # ------------------------------------------------------------------
 
     def _search(self, query: str) -> list[dict]:
-        """
-        Hit the Sunnah.com search endpoint with retry / backoff.
-        Returns a list of hadith dicts, or [] on failure.
-        """
-        # Throttle: ensure minimum gap between requests
+        """Hit the Sunnah.com search endpoint with retry / backoff."""
         elapsed = time.time() - self._last_request_time
         if elapsed < _REQUEST_DELAY:
             time.sleep(_REQUEST_DELAY - elapsed)
@@ -223,7 +377,6 @@ class HadithMatcher:
 
                 if response.status_code == 200:
                     data = response.json()
-                    # The API wraps results under 'data'
                     return data.get("data", [])
 
                 if response.status_code == 429:
@@ -235,7 +388,6 @@ class HadithMatcher:
                     time.sleep(wait)
                     continue
 
-                # Any other HTTP error: log and give up
                 logger.error(
                     "API error %d: %s",
                     response.status_code, response.text[:200],

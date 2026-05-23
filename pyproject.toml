@@ -30,12 +30,24 @@ dependencies = [
     "requests>=2.31.0",
     "tqdm>=4.66.0",
     "colorama>=0.4.6",
+    # Fix 1: thread-safe persistent cache (replaces shelve)
+    "diskcache>=5.6.0",
+    # Fix 8: fast JSON serialization
+    "orjson>=3.9.0",
+    # Fix 9: async HTTP for Hadith matching
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "pytest-cov>=4.0",      # Fix 12: coverage reporting
+    "pip-audit>=2.7.0",     # Fix 12: dependency security scanning
     "ruff>=0.4.0",
+]
+perf = [
+    # Fix 6: Aho-Corasick multi-pattern formula matching
+    "pyahocorasick>=2.0.0",
 ]
 
 [project.scripts]

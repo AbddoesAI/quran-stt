@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 from islamic_stt.core.arabic_utils import normalise_arabic
 
 logger = logging.getLogger(__name__)
@@ -91,15 +90,41 @@ _URDU_VOCAB: frozenset[str] = frozenset({
     # Pronouns & demonstratives
     "ہے", "ہیں", "ہو", "ہوں", "ہوگا", "ہوگی",
     "یہ", "وہ", "کیا", "کون", "کہاں", "کب", "کیسے", "کیوں",
+    "ہم", "تم", "آپ", "مجھے", "تجھے", "انہوں",
     # Postpositions / particles
     "کی", "کا", "کو", "کے", "سے", "میں", "پر", "نے", "تک",
+    "کیلئے", "کیساتھ", "کیبعد", "لئے", "ساتھ", "بعد",
     # Verbs / auxiliaries
     "کرنا", "کرتا", "کرتے", "کریں", "رہا", "رہے", "رہی",
     "ہوتا", "ہوتی", "ہوتے", "جاتا", "جاتے", "آتا", "آتے",
+    "دیکھنا", "دیکھو", "دیکھیں", "دیکھا", "دیکھتے",
+    "سمجھنا", "سمجھو", "سمجھیں", "سمجھا", "سمجھتے",
+    "سوچنا", "سوچو", "سوچیں", "سوچا",
+    "بتانا", "بتاؤ", "بتائیں", "بتایا",
+    "سننا", "سنو", "سنیں", "سنا", "سنتے",
+    "پڑھنا", "پڑھو", "پڑھیں", "پڑھا", "پڑھتے",
+    "ملنا", "ملا", "ملتا", "ملے", "ملیں",
+    "چاہنا", "چاہتا", "چاہتے", "چاہیے",
+    "سکتا", "سکتے", "سکتی", "سکیں",
+    "دینا", "دیتا", "دیتے", "دیں", "دیا",
+    "لینا", "لیتا", "لیتے", "لیا",
+    "آنا", "آئے", "آئیں", "آیا",
+    "جانا", "جائے", "جائیں", "گیا", "گئے", "گئی",
     # Common conversational words
     "لوگ", "لوگوں", "بہت", "ابھی", "بھی", "نہیں", "ہاں",
     "لیکن", "مگر", "اور", "پھر", "تو", "جب", "اگر",
     "والا", "والے", "والی", "اچھا", "اچھے", "بات",
+    "ضرور", "شاید", "بالکل", "کبھی", "ہمیشہ", "ابھی",
+    "یعنی", "مثلاً", "خاص", "صرف", "سب", "کچھ",
+    "وجہ", "طرف", "طریقہ", "مطلب", "حکم", "خیال",
+    # Religious Urdu terms (look Arabic but used in Urdu context)
+    "نماز", "روزہ", "زکوٰة", "حج", "مسجد", "مدرسہ",
+    "مولانا", "صاحب", "حضور", "بیان", "خطبہ", "درس",
+    "عالم", "مفتی", "علماء", "فتویٰ", "تبلیغ",
+    # Time / quantity words
+    "آج", "کل", "پہلے", "بعد", "ابھی", "اب",
+    "پہلا", "دوسرا", "تیسرا", "چوتھا",
+    "ایک", "دو", "تین", "چار", "پانچ",
     # Whisper-romanised Urdu (Arabic script, no Urdu codepoints)
     "هوتا", "هوتي", "هونا", "كرنا", "كرتا", "كرتي",
     "لوگ", "بهت", "نهيں", "كيا", "كيوں", "ليكن",
@@ -113,7 +138,12 @@ _URDU_VOCAB: frozenset[str] = frozenset({
 # Public API
 # ---------------------------------------------------------------------------
 
-def detect_language(segment_text: str, whisper_language: Optional[str] = None) -> str:
+def detect_language(
+    segment_text: str,
+    whisper_language: str | None = None,
+    *,
+    pre_normalised: str | None = None,
+) -> str:
     """
     Return the most likely ISO-639-1 language code for *segment_text*.
 
@@ -121,6 +151,9 @@ def detect_language(segment_text: str, whisper_language: Optional[str] = None) -
     ----------
     segment_text     : The raw transcribed text of one segment.
     whisper_language : The language code Whisper already assigned, if any.
+    pre_normalised   : Pre-computed normalise_arabic(segment_text) result.
+                       Pass this from the pipeline to avoid redundant regex
+                       pipelines (Fix 3).  If None, computed on demand.
 
     Returns
     -------
@@ -135,12 +168,12 @@ def detect_language(segment_text: str, whisper_language: Optional[str] = None) -
 
     # --- Step 1: trust Whisper for sufficiently long segments ---------------
     if whisper_language and word_count >= _WHISPER_TRUST_MIN_WORDS:
-        normalised = _normalise_whisper_code(whisper_language)
+        normalised_code = _normalise_whisper_code(whisper_language)
         # Even if Whisper says 'ar', verify it's not Urdu
-        if normalised == "ar" and _is_likely_urdu(text):
-            normalised = "ur"
-        if normalised != "und":
-            return normalised
+        if normalised_code == "ar" and _is_likely_urdu(text, pre_normalised=pre_normalised):
+            normalised_code = "ur"
+        if normalised_code != "und":
+            return normalised_code
 
     # --- Step 2: langdetect fast pass ---------------------------------------
     langdetect_result = _run_langdetect(text)
@@ -238,7 +271,7 @@ def _resolve_arabic_urdu(text: str) -> str:
 _URDU_EXCLUSIVE_RE = re.compile(r"[\u0679\u0688\u0691\u06BA\u06BE\u06D2\u06D3\u06D4]")
 
 
-def _is_likely_urdu(text: str) -> bool:
+def _is_likely_urdu(text: str, *, pre_normalised: str | None = None) -> bool:
     """
     True if the text contains Urdu signals that distinguish it from Arabic.
 
@@ -248,13 +281,19 @@ def _is_likely_urdu(text: str) -> bool:
       2. Urdu vocabulary words — high-frequency function words like
          کی، ہے، نہیں، بہت etc. that Whisper often outputs in standard
          Arabic characters (without Urdu-exclusive codepoints).
+
+    Parameters
+    ----------
+    pre_normalised : Already-normalised form of *text* (Fix 3).  Avoids
+                     re-running the full normalisation pipeline.
     """
     # Layer 1: Urdu-exclusive characters
     if _URDU_EXCLUSIVE_RE.search(text):
         return True
 
     # Layer 2: Urdu vocabulary (matches ≥ 2 words to avoid false positives)
-    words = set(normalise_arabic(text).split())
+    norm = pre_normalised if pre_normalised is not None else normalise_arabic(text)
+    words = set(norm.split())
     urdu_hits = words & _URDU_VOCAB
     if len(urdu_hits) >= 2:
         return True

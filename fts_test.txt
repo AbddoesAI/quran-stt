@@ -1,0 +1,10 @@
+﻿python :   File "<string>", line 6
+At line:1 char:1
++ python -c "
++ ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 6:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    rows=c.execute('''SELECT h.collection, h.hadith_no, substr(h.text_ar,1,80) as preview
+                   ^
+SyntaxError: unterminated triple-quoted string literal (detected at line 8)
